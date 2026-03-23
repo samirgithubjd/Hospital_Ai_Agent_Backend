@@ -1,8 +1,11 @@
 const Patient = require('../models/Patient');
+const User = require('../models/User');
 
 const getAllPatients = async (req, res) => {
   try {
-    const patients = await Patient.find().sort({ createdAt: -1 });
+    const patients = await User.find({ role: 'patient' })
+      .select('-password')
+      .sort({ createdAt: -1 });
 
     res.status(200).json({
       success: true,
@@ -23,8 +26,10 @@ const getPatientById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const patient = await Patient.findById(id);
-    if (!patient) {
+    const patient = await User.findById(id)
+      .select('-password');
+    
+    if (!patient || patient.role !== 'patient') {
       return res.status(404).json({
         success: false,
         message: 'Patient not found'

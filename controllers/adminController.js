@@ -82,7 +82,7 @@ const createAdmin = async (req, res) => {
  */
 const createDoctor = async (req, res) => {
   try {
-    const { email, password, firstName, lastName, phone, specialization, department, licenseNumber } = req.body;
+    const { email, password, firstName, lastName, phone, specialization, department, licenseNumber, city, experience, mobileNumber } = req.body;
 
     // Validation
     if (!email || !password || !firstName || !lastName) {
@@ -130,6 +130,9 @@ const createDoctor = async (req, res) => {
       specialization,
       department,
       licenseNumber,
+      city,
+      experience,
+      mobileNumber,
       isActive: false // Doctors start as inactive, can be approved by admin
     });
 
@@ -145,9 +148,13 @@ const createDoctor = async (req, res) => {
           username: doctor.username,
           firstName: doctor.firstName,
           lastName: doctor.lastName,
+          phone: doctor.phone,
           specialization: doctor.specialization,
           department: doctor.department,
           licenseNumber: doctor.licenseNumber,
+          city: doctor.city,
+          experience: doctor.experience,
+          mobileNumber: doctor.mobileNumber,
           role: 'doctor',
           isActive: false,
           createdAt: doctor.createdAt
@@ -311,6 +318,47 @@ const approveDoctor = async (req, res) => {
 };
 
 /**
+ * Reject Doctor (Admin Only)
+ */
+const rejectDoctor = async (req, res) => {
+  try {
+    const { doctorId } = req.params;
+    const { reason } = req.body;
+
+    const doctor = await User.findById(doctorId);
+    if (!doctor || doctor.role !== 'doctor') {
+      return res.status(404).json({
+        success: false,
+        message: 'Doctor not found'
+      });
+    }
+
+    // Delete the doctor account
+    await User.findByIdAndDelete(doctorId);
+
+    res.status(200).json({
+      success: true,
+      message: 'Doctor rejected and deleted successfully',
+      data: {
+        id: doctor._id,
+        email: doctor.email,
+        firstName: doctor.firstName,
+        lastName: doctor.lastName,
+        rejectionReason: reason || 'No reason provided',
+        rejectedAt: new Date()
+      }
+    });
+  } catch (error) {
+    console.error('Reject Doctor Error:', error.message);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to reject doctor',
+      error: error.message
+    });
+  }
+};
+
+/**
  * Deactivate Doctor (Admin Only)
  */
 const deactivateDoctor = async (req, res) => {
@@ -358,7 +406,7 @@ const deactivateDoctor = async (req, res) => {
 const updateDoctor = async (req, res) => {
   try {
     const { doctorId } = req.params;
-    const { specialization, department, phone } = req.body;
+    const { specialization, department, phone, city, experience, mobileNumber } = req.body;
 
     const doctor = await User.findById(doctorId);
     if (!doctor || doctor.role !== 'doctor') {
@@ -371,6 +419,9 @@ const updateDoctor = async (req, res) => {
     if (specialization) doctor.specialization = specialization;
     if (department) doctor.department = department;
     if (phone) doctor.phone = phone;
+    if (city) doctor.city = city;
+    if (experience !== undefined) doctor.experience = experience;
+    if (mobileNumber) doctor.mobileNumber = mobileNumber;
 
     await doctor.save();
 
@@ -382,9 +433,12 @@ const updateDoctor = async (req, res) => {
         email: doctor.email,
         firstName: doctor.firstName,
         lastName: doctor.lastName,
+        phone: doctor.phone,
         specialization: doctor.specialization,
         department: doctor.department,
-        phone: doctor.phone
+        city: doctor.city,
+        experience: doctor.experience,
+        mobileNumber: doctor.mobileNumber
       }
     });
   } catch (error) {
@@ -392,6 +446,44 @@ const updateDoctor = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to update doctor',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Delete Doctor (Admin Only)
+ */
+const deleteDoctor = async (req, res) => {
+  try {
+    const { doctorId } = req.params;
+
+    const doctor = await User.findById(doctorId);
+    if (!doctor || doctor.role !== 'doctor') {
+      return res.status(404).json({
+        success: false,
+        message: 'Doctor not found'
+      });
+    }
+
+    await User.findByIdAndDelete(doctorId);
+
+    res.status(200).json({
+      success: true,
+      message: 'Doctor deleted successfully',
+      data: {
+        id: doctor._id,
+        email: doctor.email,
+        firstName: doctor.firstName,
+        lastName: doctor.lastName,
+        deletedAt: new Date()
+      }
+    });
+  } catch (error) {
+    console.error('Delete Doctor Error:', error.message);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete doctor',
       error: error.message
     });
   }
@@ -501,6 +593,48 @@ const getSystemStats = async (req, res) => {
   }
 };
 
+/**
+ * Get All Active Doctors (For Patients - Public Access)
+ * Returns active doctors for patient dashboard to book appointments
+ */
+const getActiveDoctors = async (req, res) => {
+  try {
+    const { page = 1, limit = 10, specialization } = req.query;
+
+    const filter = { role: 'doctor', isActive: true };
+    if (specialization) filter.specialization = specialization;
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const doctors = await User.find(filter)
+      .select('-password')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
+
+    const total = await User.countDocuments(filter);
+
+    res.status(200).json({
+      success: true,
+      message: 'Active doctors retrieved successfully',
+      data: doctors,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        pages: Math.ceil(total / parseInt(limit))
+      }
+    });
+  } catch (error) {
+    console.error('Get Active Doctors Error:', error.message);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve active doctors',
+      error: error.message
+    });
+  }
+};
+
 module.exports = {
   createAdmin,
   createDoctor,
@@ -508,9 +642,12 @@ module.exports = {
   getAllDoctors,
   getPendingDoctors,
   approveDoctor,
+  rejectDoctor,
   deactivateDoctor,
   updateDoctor,
+  deleteDoctor,
   getAllPatients,
   getUserById,
-  getSystemStats
+  getSystemStats,
+  getActiveDoctors
 };

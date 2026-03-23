@@ -53,6 +53,18 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: false
     },
+    city: {
+      type: String,
+      required: false
+    },
+    experience: {
+      type: Number,
+      required: false
+    },
+    mobileNumber: {
+      type: String,
+      required: false
+    },
     // Patient specific fields
     age: {
       type: Number,

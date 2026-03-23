@@ -8,15 +8,30 @@ const {
   getAllDoctors,
   getPendingDoctors,
   approveDoctor,
+  rejectDoctor,
   deactivateDoctor,
   updateDoctor,
+  deleteDoctor,
   getAllPatients,
   getUserById,
-  getSystemStats
+  getSystemStats,
+  getActiveDoctors
 } = require('../controllers/adminController');
 
 /**
- * All routes require authentication and admin role
+ * PUBLIC ROUTES (Authenticated users only)
+ */
+
+/**
+ * @route   GET /api/admin/active-doctors
+ * @desc    Get all active doctors for patient dashboard (Public - Authenticated)
+ * @access  Authenticated Users (Patients, Doctors, Admins)
+ * @query   { page, limit, specialization }
+ */
+router.get('/active-doctors', authMiddleware, getActiveDoctors);
+
+/**
+ * All routes below require authentication and admin role
  */
 router.use(authMiddleware);
 router.use(roleMiddleware('admin'));
@@ -73,6 +88,15 @@ router.get('/doctors/pending', getPendingDoctors);
 router.put('/doctors/:doctorId/approve', approveDoctor);
 
 /**
+ * @route   POST /api/admin/doctors/:doctorId/reject
+ * @desc    Reject a doctor account (Admin only)
+ * @access  Admin
+ * @params  { doctorId }
+ * @body    { reason }
+ */
+router.post('/doctors/:doctorId/reject', rejectDoctor);
+
+/**
  * @route   PUT /api/admin/doctors/:doctorId/deactivate
  * @desc    Deactivate a doctor account (Admin only)
  * @access  Admin
@@ -86,9 +110,17 @@ router.put('/doctors/:doctorId/deactivate', deactivateDoctor);
  * @desc    Update doctor information (Admin only)
  * @access  Admin
  * @params  { doctorId }
- * @body    { specialization, department, phone }
+ * @body    { specialization, department, phone, city, experience, mobileNumber }
  */
 router.put('/doctors/:doctorId/update', updateDoctor);
+
+/**
+ * @route   DELETE /api/admin/doctors/:doctorId
+ * @desc    Delete a doctor account (Admin only)
+ * @access  Admin
+ * @params  { doctorId }
+ */
+router.delete('/doctors/:doctorId', deleteDoctor);
 
 // ============= PATIENT MANAGEMENT =============
 
