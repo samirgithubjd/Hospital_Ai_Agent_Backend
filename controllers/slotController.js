@@ -722,6 +722,84 @@ const bulkUpdateSlots = async (req, res) => {
   }
 };
 
+/**
+ * Check if a specific slot is available
+ * POST /api/slots/check-availability
+ * Used by AI agent to verify before booking
+ */
+const checkSlotAvailability = async (req, res) => {
+  try {
+    const { doctorId, date, time, duration } = req.body;
+
+    // Validation
+    if (!doctorId || !date || !time) {
+      return res.status(400).json({
+        success: false,
+        message: 'doctorId, date, and time are required'
+      });
+    }
+
+    // Verify doctor exists
+    const doctor = await User.findById(doctorId);
+    if (!doctor || doctor.role !== 'doctor') {
+      return res.status(404).json({
+        success: false,
+        message: 'Doctor not found'
+      });
+    }
+
+    // Parse date
+    const queryDate = new Date(date);
+    queryDate.setHours(0, 0, 0, 0);
+
+    const nextDay = new Date(queryDate);
+    nextDay.setDate(nextDay.getDate() + 1);
+
+    // Find slot that matches doctor, date, and time
+    const slot = await Slot.findOne({
+      doctorId,
+      date: {
+        $gte: queryDate,
+        $lt: nextDay
+      },
+      startTime: { $lte: time },
+      endTime: { $gte: time },
+      isAvailable: true
+    }).populate('doctorId', 'firstName lastName specialization');
+
+    if (!slot) {
+      return res.status(200).json({
+        success: true,
+        available: false,
+        message: 'No available slot found for the requested date and time'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      available: true,
+      message: 'Slot is available for booking',
+      data: {
+        slotId: slot._id,
+        doctorId: slot.doctorId._id,
+        doctorName: `${slot.doctorId.firstName} ${slot.doctorId.lastName}`,
+        specialization: slot.doctorId.specialization,
+        date: date,
+        startTime: slot.startTime,
+        endTime: slot.endTime,
+        duration: slot.slotDuration
+      }
+    });
+  } catch (error) {
+    console.error('Check Slot Availability Error:', error.message);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to check slot availability',
+      error: error.message
+    });
+  }
+};
+
 module.exports = {
   addSlots,
   getAvailableSlots,
@@ -735,5 +813,6 @@ module.exports = {
   getAllDoctorSlots,
   getAllSlots,
   deleteMultipleSlots,
-  bulkUpdateSlots
+  bulkUpdateSlots,
+  checkSlotAvailability
 };

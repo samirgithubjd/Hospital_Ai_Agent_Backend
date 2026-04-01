@@ -15,6 +15,8 @@ const appointmentRoutes = require('./routes/appointments');
 const webhookRoutes = require('./routes/webhook');
 const adminRoutes = require('./routes/admin');
 const slotRoutes = require('./routes/slots');
+const agentRoutes = require('./routes/agents');
+const vapiToolRoutes = require('./routes/vapiTools');
 
 // Initialize Express app
 const app = express();
@@ -71,6 +73,8 @@ app.use('/api/appointments', appointmentRoutes);
 app.use('/api/webhook', webhookRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/slots', slotRoutes);
+app.use('/api/agents', agentRoutes);
+app.use('/api/vapi-tools', vapiToolRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -119,3 +123,14 @@ process.on('SIGINT', () => {
 });
 
 module.exports = app;
+
+
+
+// patient token
+// eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiI2OWJkMTI2OGU4ZjQxZGIzYjRkYTE1YTMiLCJyb2xlIjoicGF0aWVudCIsImlhdCI6MTc3NDUxNDE0NCwiZXhwIjoxNzc1MTE4OTQ0fQ.QI0nAbQwcAlKKBCA7GafW65nQ6KS4WktXJtfg4c7T98
+
+// doctor token
+// eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiI2OWJkMTI2ODhlODQxZGIzYjRkYTE1YTIiLCJyb2xlIjoiZG9jdG9yIiwiaWF0IjoxNzc0NTE0MTQ0LCJleHAiOjE3NzUxMTg5NDR9.7n8sKqj8mLhH4e7Zt3uXoVh8l6aWz5sXoFvPz9b8w
+
+// admin token
+// eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiI2OWJkMTI2ODhlODQxZGIzYjRkYTE1YTIiLCJyb2xlIjoiYWRtaW4iLCJpYXQiOjE3NzQ1MTQxNDQsImV4cCI6MTc3NTExODk0NH0.7n8sKqj8mLhH4e7Zt3uXoVh8l6aWz5sXoFvPz9b8w

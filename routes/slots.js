@@ -14,7 +14,8 @@ const {
   getAllDoctorSlots,
   getAllSlots,
   deleteMultipleSlots,
-  bulkUpdateSlots
+  bulkUpdateSlots,
+  checkSlotAvailability
 } = require('../controllers/slotController');
 
 // ============= ADMIN PANEL ROUTES (Admin Only) - MUST BE FIRST =============
@@ -70,6 +71,14 @@ router.get('/doctors/:doctorId/available-slots', authMiddleware, getAvailableSlo
  * @query   { date }
  */
 router.get('/available', authMiddleware, getAllAvailableSlotsForDate);
+
+/**
+ * @route   POST /api/slots/check-availability
+ * @desc    Check if a specific slot is available (used by AI agent)
+ * @access  Authenticated (AI Agent/System)
+ * @body    { doctorId, date, time, duration }
+ */
+router.post('/check-availability', authMiddleware, checkSlotAvailability);
 
 // ============= DOCTOR ROUTES (Doctor/Admin Only) =============
 
