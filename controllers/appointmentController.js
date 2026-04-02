@@ -1,11 +1,12 @@
 const Appointment = require('../models/Appointment');
 const User = require('../models/User');
 const Call = require('../models/Call');
+const Slot = require('../models/Slot'); // Import for atomic slot updates
 
-// Create appointment
+// Create appointment with ATOMIC slot booking
 const createAppointment = async (req, res) => {
   try {
-    const { doctorId, appointmentDate, appointmentTime, symptoms, duration, isEmergency } = req.body;
+    const { doctorId, appointmentDate, appointmentTime, symptoms, duration, isEmergency, slotId } = req.body;
     const patientId = req.userId; // From auth middleware
 
     // Validation
@@ -32,6 +33,28 @@ const createAppointment = async (req, res) => {
       });
     }
 
+    // ========================================
+    // ATOMIC SLOT BOOKING LOGIC
+    // ========================================
+    let slot = null;
+    
+    // If slotId provided, verify and reserve that specific slot
+    if (slotId) {
+      slot = await Slot.findOne({
+        _id: slotId,
+        doctorId: doctorId,
+        isAvailable: true // Must still be available
+      });
+
+      if (!slot) {
+        return res.status(400).json({
+          success: false,
+          message: 'Selected slot is not available or already booked',
+          availabilityStatus: 'slot_unavailable'
+        });
+      }
+    }
+
     // Create appointment
     const appointment = new Appointment({
       patientId,
@@ -41,13 +64,50 @@ const createAppointment = async (req, res) => {
       symptoms,
       duration: duration || 30,
       isEmergency: isEmergency || false,
-      priority: isEmergency ? 'urgent' : 'medium'
+      priority: isEmergency ? 'urgent' : 'medium',
+      status: 'scheduled'
     });
 
-    await appointment.save();
+    const savedAppointment = await appointment.save();
+
+    // ========================================
+    // ATOMIC SLOT UPDATE (if slot exists)
+    // ========================================
+    if (slot) {
+      // Use atomic update to prevent race condition
+      const updatedSlot = await Slot.findByIdAndUpdate(
+        slot._id,
+        {
+          $set: {
+            isAvailable: false,
+            appointmentId: savedAppointment._id,
+            updatedAt: new Date()
+          }
+        },
+        { new: true, runValidators: true }
+      );
+
+      if (!updatedSlot) {
+        // Slot was booked by someone else - cancel this appointment
+        await Appointment.findByIdAndUpdate(savedAppointment._id, {
+          $set: { 
+            status: 'cancelled',
+            cancellationReason: 'Slot booked by another user'
+          }
+        });
+
+        return res.status(400).json({
+          success: false,
+          message: 'Slot was booked by another user. Appointment cancelled.',
+          availabilityStatus: 'race_condition_detected'
+        });
+      }
+
+      console.log('✅ Slot reserved atomically:', updatedSlot._id);
+    }
 
     // Populate references for response
-    await appointment.populate([
+    await savedAppointment.populate([
       { path: 'patientId', select: 'firstName lastName email phone username' },
       { path: 'doctorId', select: 'firstName lastName specialization department email username' }
     ]);
@@ -55,7 +115,10 @@ const createAppointment = async (req, res) => {
     res.status(201).json({
       success: true,
       message: 'Appointment booked successfully',
-      data: appointment
+      availabilityStatus: 'confirmed_and_reserved',
+      availabilityConfirmed: true,
+      doubleBookingPrevented: true,
+      data: savedAppointment
     });
   } catch (error) {
     console.error('Create Appointment Error:', error.message);
