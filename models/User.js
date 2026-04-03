@@ -38,6 +38,21 @@ const userSchema = new mongoose.Schema(
     },
     phone: {
       type: String,
+      required: false,
+      unique: true,
+      sparse: true
+    },
+    // Email verification fields
+    isEmailVerified: {
+      type: Boolean,
+      default: false
+    },
+    emailVerificationToken: {
+      type: String,
+      required: false
+    },
+    emailVerificationExpiry: {
+      type: Date,
       required: false
     },
     // Doctor specific fields
