@@ -41,10 +41,14 @@ router.post('/', async (req, res) => {
         response = await handleFindDoctor(toolUse.input);
         break;
 
+      case 'register_patient':
+        response = await handleRegisterPatient(toolUse.input);
+        break;
+
       default:
         response = {
           error: `Unknown tool: ${toolUse?.toolName}`,
-          availableTools: ['check_patient', 'get_available_slots', 'book_appointment', 'check_symptoms', 'find_doctor']
+          availableTools: ['check_patient', 'get_available_slots', 'book_appointment', 'check_symptoms', 'find_doctor', 'register_patient']
         };
     }
 
@@ -485,27 +489,126 @@ router.post('/check-slots-availability', async (req, res) => {
  * @desc    Check if patient exists (VAPI Direct Call)
  * @access  Public (No Auth Required - Direct VAPI Integration)
  * @body    { phone, email, phoneNumber }
+ * @example
+ * Request:
+ * {
+ *   "phone": "1234567890"
+ * }
+ * or
+ * {
+ *   "phoneNumber": "1234567890"
+ * }
+ * or
+ * {
+ *   "email": "john@example.com"
+ * }
+ * Response - Patient Found:
+ * {
+ *   "success": true,
+ *   "data": {
+ *     "found": true,
+ *     "isExisting": true,
+ *     "patientId": "507f1f77bcf86cd799439012",
+ *     "name": "John Doe",
+ *     "email": "john@example.com",
+ *     "phone": "1234567890",
+ *     "dateOfBirth": "1990-05-15",
+ *     "gender": "male",
+ *     "message": "Patient John Doe found in system"
+ *   }
+ * }
+ * Response - Patient Not Found:
+ * {
+ *   "success": true,
+ *   "data": {
+ *     "found": false,
+ *     "isExisting": false,
+ *     "isNew": true,
+ *     "message": "Patient not found. Treat as new patient and collect details."
+ *   }
+ * }
  */
 router.post('/check-patient', async (req, res) => {
   try {
-    console.log('📥 Raw Request Body:', JSON.stringify(req.body, null, 2));
+    console.log('📥 Raw Request Body:', req.body);
+    console.log('📥 Body Type:', typeof req.body);
+    console.log('📥 Body Keys:', Object.keys(req.body || {}));
+    console.log('📥 Content-Type Header:', req.headers['content-type']);
     
-    let payload = req.body;
-    if (req.body.input) payload = req.body.input;
-    else if (req.body.parameters) payload = req.body.parameters;
+    // Handle multiple payload formats
+    let payload = {};
+    
+    // Check if body is completely empty
+    if (!req.body || (typeof req.body === 'object' && Object.keys(req.body).length === 0)) {
+      console.warn('⚠️ Request body is empty!');
+      const errorResponse = {
+        found: false,
+        isExisting: false,
+        error: 'Request body is empty. Please send JSON with Content-Type: application/json',
+        expectedFormat: {
+          option1: { phone: '1234567890' },
+          option2: { phoneNumber: '1234567890' },
+          option3: { email: 'user@example.com' }
+        }
+      };
+      return res.status(400).json({
+        success: false,
+        result: errorResponse
+      });
+    }
+    
+    // Extract payload from various formats
+    if (req.body.input) {
+      // VAPI format: { toolUse: { input: { ... } } }
+      payload = req.body.input;
+      console.log('✓ Using VAPI input format');
+    } else if (req.body.parameters) {
+      // Alternative format: { parameters: { ... } }
+      payload = req.body.parameters;
+      console.log('✓ Using parameters format');
+    } else if (req.body.data) {
+      // Another format: { data: { phone, email } }
+      payload = req.body.data;
+      console.log('✓ Using data wrapper format');
+    } else {
+      // Direct format: { phone: "123", email: "..." }
+      payload = req.body;
+      console.log('✓ Using direct format');
+    }
     
     console.log('📤 Extracted Payload:', JSON.stringify(payload, null, 2));
     
+    // Final validation
+    if (!payload || (typeof payload === 'object' && Object.keys(payload).length === 0)) {
+      const errorResponse = {
+        found: false,
+        isExisting: false,
+        error: 'Payload is empty after extraction'
+      };
+      return res.status(400).json({
+        success: false,
+        result: errorResponse
+      });
+    }
+    
+    // Call the handler
     const result = await handleCheckPatient(payload);
+    
+    // Return response in VAPI-compatible format
     res.status(200).json({
       success: true,
-      data: result
+      result: result  // VAPI expects 'result' field
     });
+    
   } catch (error) {
     console.error('❌ Check Patient Error:', error.message);
     res.status(500).json({
       success: false,
-      error: error.message
+      result: {
+        error: error.message,
+        found: false,
+        isExisting: false
+      }
     });
   }
 });
@@ -518,24 +621,32 @@ router.post('/check-patient', async (req, res) => {
  */
 router.post('/find-doctor', async (req, res) => {
   try {
-    console.log('📥 Raw Request Body:', JSON.stringify(req.body, null, 2));
+    console.log('📥 Raw Request Body:', req.body);
     
     let payload = req.body;
-    if (req.body.input) payload = req.body.input;
-    else if (req.body.parameters) payload = req.body.parameters;
+    if (req.body && req.body.input) payload = req.body.input;
+    else if (req.body && req.body.parameters) payload = req.body.parameters;
+    else if (!req.body || Object.keys(req.body).length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Request body is empty. Send: {"specialization":"Cardiology"} or {"doctorName":"John"}'
+      });
+    }
     
     console.log('📤 Extracted Payload:', JSON.stringify(payload, null, 2));
     
     const result = await handleFindDoctor(payload);
     res.status(200).json({
       success: true,
-      data: result
+      result: result
     });
   } catch (error) {
     console.error('❌ Find Doctor Error:', error.message);
     res.status(500).json({
       success: false,
-      error: error.message
+      result: {
+        error: error.message
+      }
     });
   }
 });
@@ -563,18 +674,25 @@ router.post('/find-doctor', async (req, res) => {
  */
 router.post('/check-doctor-availability', async (req, res) => {
   try {
-    console.log('📥 Raw Request Body:', JSON.stringify(req.body, null, 2));
+    console.log('📥 Raw Request Body:', req.body);
     
     // Extract payload in multiple formats (for VAPI compatibility)
     let payload = req.body;
     
     // If parameters are nested in 'input' object
-    if (req.body.input) {
+    if (req.body && req.body.input) {
       payload = req.body.input;
     }
     // If parameters are nested in 'parameters' object
-    else if (req.body.parameters) {
+    else if (req.body && req.body.parameters) {
       payload = req.body.parameters;
+    }
+    
+    if (!payload || Object.keys(payload).length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Request body is empty. Send: {"doctorId":"doctor_mongo_id"}'
+      });
     }
     
     console.log('📤 Extracted Payload:', JSON.stringify(payload, null, 2));
@@ -584,14 +702,16 @@ router.post('/check-doctor-availability', async (req, res) => {
     
     res.status(200).json({
       success: !result.error,
-      data: result
+      result: result
     });
   } catch (error) {
     console.error('❌ Check Doctor Availability Error:', error.message);
     res.status(500).json({
       success: false,
-      error: error.message,
-      available: false
+      result: {
+        error: error.message,
+        available: false
+      }
     });
   }
 });
@@ -656,14 +776,82 @@ router.post('/list-doctors', async (req, res) => {
     const result = await handleListDoctors(payload);
     res.status(200).json({
       success: !result.error,
-      data: result
+      result: result
     });
   } catch (error) {
     console.error('❌ List Doctors Error:', error.message);
     res.status(500).json({
       success: false,
-      error: error.message,
-      doctors: []
+      result: {
+        error: error.message,
+        doctors: []
+      }
+    });
+  }
+});
+
+/**
+ * @route   POST /api/vapi-tools/register-patient
+ * @desc    Register new patient from VAPI agent (VAPI Direct Call)
+ * @access  Public (No Auth Required - Direct VAPI Integration)
+ * @body    { firstName, lastName, email, phone, password, age, medicalHistory, gender, dateOfBirth }
+ * @example
+ * Request:
+ * {
+ *   "firstName": "John",
+ *   "lastName": "Doe",
+ *   "email": "john@example.com",
+ *   "phone": "1234567890",
+ *   "age": 30,
+ *   "gender": "male",
+ *   "medicalHistory": "None"
+ * }
+ * Response:
+ * {
+ *   "success": true,
+ *   "patientId": "507f1f77bcf86cd799439012",
+ *   "name": "John Doe",
+ *   "email": "john@example.com",
+ *   "phone": "1234567890",
+ *   "role": "patient",
+ *   "registered": true,
+ *   "message": "✅ Patient registered successfully"
+ * }
+ */
+router.post('/register-patient', async (req, res) => {
+  try {
+    console.log('📥 Raw Register Patient Request Body:', req.body);
+    
+    // Extract payload in multiple formats (for VAPI compatibility)
+    let payload = req.body;
+    if (req.body && req.body.input) {
+      payload = req.body.input;
+    } else if (req.body && req.body.parameters) {
+      payload = req.body.parameters;
+    }
+    
+    if (!payload || Object.keys(payload).length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Request body is empty. Send: {"firstName":"John","lastName":"Doe","email":"john@example.com","phone":"1234567890"}'
+      });
+    }
+    
+    console.log('📤 Extracted Register Patient Payload:', JSON.stringify(payload, null, 2));
+    
+    const result = await handleRegisterPatient(payload);
+    
+    res.status(result.error ? 400 : 201).json({
+      success: !result.error,
+      result: result
+    });
+  } catch (error) {
+    console.error('❌ Register Patient Error:', error.message);
+    res.status(500).json({
+      success: false,
+      result: {
+        error: error.message
+      }
     });
   }
 });
@@ -675,57 +863,97 @@ router.post('/list-doctors', async (req, res) => {
  */
 async function handleCheckPatient(input) {
   try {
-    const { phone, email, phoneNumber } = input;
-    const searchPhone = phone || phoneNumber;
+    // Log ALL input properties to debug VAPI payload format
+    console.log('📥 handleCheckPatient Input Keys:', Object.keys(input));
+    console.log('📥 handleCheckPatient Full Input:', JSON.stringify(input, null, 2));
 
-    console.log('🔍 Checking Patient:', { searchPhone, email });
+    // Extract phone from multiple possible property names (VAPI might send differently)
+    const phoneProperty = input.phone || input.phoneNumber || input.phone_number || 
+                          input.patientPhone || input.patient_phone || input.contactPhone || 
+                          input.contact_phone || input.mobileNumber || input.mobile_number;
+    
+    // Extract email from multiple possible property names
+    const emailProperty = input.email || input.userEmail || input.user_email || 
+                          input.patientEmail || input.patient_email;
+
+    const searchPhone = phoneProperty?.toString().trim();
+    const searchEmail = emailProperty?.toString().toLowerCase().trim();
+
+    console.log('🔍 Extracted Search Params:', { searchPhone, searchEmail });
 
     let query = { role: 'patient' };
 
     if (searchPhone) {
-      // Normalize phone number
+      // Normalize phone number - remove all non-digits for better matching
       const normalized = searchPhone.replace(/\D/g, '');
+      console.log('📱 Phone Search - Original:', searchPhone, 'Normalized:', normalized);
+      
+      // Search by exact match or partial match with regex
       query.$or = [
-        { phone: searchPhone },
-        { phone: { $regex: normalized, $options: 'i' } }
+        { phone: searchPhone },                                  // Exact match
+        { phone: normalized },                                   // Normalized exact match
+        { phone: { $regex: normalized, $options: 'i' } }        // Partial regex match
       ];
     }
 
-    if (email) {
-      query.email = email;
+    if (searchEmail) {
+      // Handle email separately
+      if (query.$or) {
+        // If phone is provided, add email to $or conditions
+        query.$or.push({ email: searchEmail });
+      } else {
+        // Only email provided
+        query.email = searchEmail;
+      }
     }
 
+    console.log('🔎 Final Query:', JSON.stringify(query, null, 2));
+
     const patient = await User.findOne(query).select(
-      '_id firstName lastName email phone dateOfBirth gender emergencyContact'
+      '_id firstName lastName email phone dateOfBirth gender emergencyContact role'
     );
 
+    console.log('📊 Database Query Result:', patient ? 'FOUND' : 'NOT FOUND');
     if (patient) {
-      console.log('✅ Patient Found:', patient._id);
+      console.log('✅ Patient Located:', {
+        id: patient._id,
+        name: `${patient.firstName} ${patient.lastName}`,
+        phone: patient.phone
+      });
+    }
+
+    if (patient) {
       return {
         found: true,
         isExisting: true,
-        patientId: patient._id,
+        patientId: patient._id.toString(),
         name: `${patient.firstName} ${patient.lastName}`,
+        firstName: patient.firstName,
+        lastName: patient.lastName,
         email: patient.email,
         phone: patient.phone,
         dateOfBirth: patient.dateOfBirth,
         gender: patient.gender,
-        message: `Patient ${patient.firstName} found in system`
+        role: patient.role,
+        message: `Found existing patient: ${patient.firstName} ${patient.lastName}`
       };
     } else {
-      console.log('ℹ️ Patient Not Found - New Patient');
+      console.log('ℹ️ Patient Not Found - Treat as New Patient');
       return {
         found: false,
         isExisting: false,
         isNew: true,
-        message: 'Patient not found. Treat as new patient and collect details.'
+        message: 'Patient not found in system. Proceed with new patient registration.',
+        suggestAction: 'register'
       };
     }
   } catch (error) {
     console.error('❌ Check Patient Error:', error.message);
+    console.error('❌ Error Stack:', error.stack);
     return {
       error: error.message,
-      found: false
+      found: false,
+      isExisting: false
     };
   }
 }
@@ -1228,7 +1456,24 @@ async function handleFindDoctor(input) {
   try {
     const { doctorName, doctor_name, specialization, specialty } = input;
     const searchName = doctorName || doctor_name;
-    const searchSpecialty = specialization || specialty;
+    let searchSpecialty = specialization || specialty;
+
+    // Normalize specialization - handle common variations
+    if (searchSpecialty) {
+      // Remove common suffixes for matching
+      searchSpecialty = searchSpecialty.trim();
+      
+      // Create flexible regex that handles variations
+      // e.g., "Cardiologist" will match "Cardiology", "Cardio" will match both
+      const baseSpecialty = searchSpecialty
+        .replace(/ist$|ology$/i, '') // Remove -ist and -ology suffixes
+        .trim();
+      
+      console.log('🔍 Specialty Normalization:', {
+        original: searchSpecialty,
+        base: baseSpecialty
+      });
+    }
 
     console.log('🏥 Finding Doctor:', {
       name: searchName,
@@ -1245,19 +1490,29 @@ async function handleFindDoctor(input) {
     }
 
     if (searchSpecialty) {
-      query.specialization = { $regex: searchSpecialty, $options: 'i' };
+      // Enhanced search: match specialty, specialization, and variations
+      query.$or = query.$or || [];
+      query.$or.push(
+        { specialization: { $regex: searchSpecialty, $options: 'i' } },
+        { specialization: { $regex: searchSpecialty.replace(/ist$|ology$/i, ''), $options: 'i' } }
+      );
     }
 
+    console.log('📊 Query:', JSON.stringify(query, null, 2));
+
     const doctors = await User.find(query)
-      .select('_id firstName lastName specialization phone email')
-      .limit(5);
+      .select('_id firstName lastName specialization department phone email licenseNumber experience city isActive')
+      .limit(20);
+
+    console.log(`📍 Found ${doctors.length} doctors in database`);
 
     if (doctors.length === 0) {
-      console.log('ℹ️ No doctors found matching criteria');
+      console.log('⚠️ No doctors found matching criteria');
       return {
         found: false,
+        doctorCount: 0,
         doctors: [],
-        message: `No doctors found${searchName ? ` matching "${searchName}"` : ''}${searchSpecialty ? ` with ${searchSpecialty}` : ''}`
+        message: `No doctors found${searchName ? ` matching "${searchName}"` : ''}${searchSpecialty ? ` with specialty "${searchSpecialty}"` : ''}`
       };
     }
 
@@ -1267,19 +1522,28 @@ async function handleFindDoctor(input) {
       found: true,
       doctorCount: doctors.length,
       doctors: doctors.map(doc => ({
-        doctorId: doc._id,
-        name: `${doc.firstName} ${doc.lastName}`,
-        specialty: doc.specialization,
-        phone: doc.phone,
-        email: doc.email
+        doctorId: doc._id.toString(),
+        name: `Dr. ${doc.firstName} ${doc.lastName}`,
+        firstName: doc.firstName,
+        lastName: doc.lastName,
+        specialization: doc.specialization,
+        department: doc.department || 'Not specified',
+        phone: doc.phone || 'Not available',
+        email: doc.email || 'Not available',
+        licenseNumber: doc.licenseNumber || 'Not specified',
+        experience: doc.experience ? `${doc.experience} years` : 'Not specified',
+        city: doc.city || 'Not specified',
+        isActive: doc.isActive,
+        status: 'Available for booking'
       })),
-      message: `Found ${doctors.length} available doctors`
+      message: `✅ Found ${doctors.length} available doctor(s)${searchSpecialty ? ` in ${searchSpecialty}` : ''}`
     };
   } catch (error) {
     console.error('❌ Find Doctor Error:', error.message);
     return {
       error: error.message,
       found: false,
+      doctorCount: 0,
       doctors: []
     };
   }
@@ -1377,6 +1641,101 @@ async function handleListDoctors(input) {
       success: false,
       totalDoctors: 0,
       doctors: []
+    };
+  }
+}
+
+/**
+ * Tool: Register Patient
+ * Create new patient account via VAPI agent
+ * For NEW patients calling the hospital's VAPI agent
+ * Returns patientId to use for appointment booking
+ */
+async function handleRegisterPatient(input) {
+  try {
+    const { firstName, lastName, email, phone, password, age, medicalHistory, gender, dateOfBirth } = input;
+
+    console.log('👤 Registering New Patient:', { firstName, lastName, email, phone });
+
+    // ========================================
+    // VALIDATION
+    // ========================================
+    if (!firstName || !lastName || !email || !phone) {
+      return {
+        error: 'firstName, lastName, email, and phone are required',
+        success: false
+      };
+    }
+
+    // Check if patient already exists
+    const existingPatient = await User.findOne({
+      $or: [
+        { email: email.toLowerCase() },
+        { phone: phone }
+      ],
+      role: 'patient'
+    });
+
+    if (existingPatient) {
+      console.log('⚠️ Patient already exists:', existingPatient._id);
+      return {
+        found: true,
+        isExisting: true,
+        patientId: existingPatient._id,
+        name: `${existingPatient.firstName} ${existingPatient.lastName}`,
+        email: existingPatient.email,
+        phone: existingPatient.phone,
+        message: `Patient ${existingPatient.firstName} already registered. Proceeding with booking...`,
+        alreadyExists: true
+      };
+    }
+
+    // ========================================
+    // CREATE NEW PATIENT
+    // ========================================
+    
+    // Generate username from email
+    const username = email.split('@')[0] + '_' + Date.now();
+    
+    // Generate temporary password if not provided
+    const patientPassword = password || 'Temp@' + Math.random().toString(36).slice(-8);
+
+    const newPatient = new User({
+      firstName,
+      lastName,
+      email: email.toLowerCase(),
+      username,
+      password: patientPassword,
+      phone,
+      role: 'patient',
+      age,
+      medicalHistory,
+      gender,
+      dateOfBirth,
+      isEmailVerified: false, // Email not verified yet via VAPI
+      isActive: true
+    });
+
+    await newPatient.save();
+
+    console.log('✅ New Patient Registered:', newPatient._id);
+
+    return {
+      success: true,
+      registered: true,
+      patientId: newPatient._id,
+      name: `${newPatient.firstName} ${newPatient.lastName}`,
+      email: newPatient.email,
+      phone: newPatient.phone,
+      role: 'patient',
+      username: newPatient.username,
+      message: `✅ Patient ${newPatient.firstName} ${newPatient.lastName} registered successfully! Ready to book appointment.`
+    };
+  } catch (error) {
+    console.error('❌ Register Patient Error:', error.message);
+    return {
+      error: error.message,
+      success: false
     };
   }
 }

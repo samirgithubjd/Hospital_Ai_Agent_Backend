@@ -21,10 +21,23 @@ const vapiToolRoutes = require('./routes/vapiTools');
 // Initialize Express app
 const app = express();
 
-// Middleware
-app.use(express.json());
-// Enable CORS for all routes (configure as needed) remove when push code to production
+// Middleware - IMPORTANT ORDER!
+// 1. JSON/URL Body Parser (MUST be first)
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
+
+// 2. CORS
 app.use(cors());
+
+// 3. Request Logging for debugging
+app.use((req, res, next) => {
+  if (req.method === 'POST' || req.method === 'PUT') {
+    console.log(`\n[${new Date().toISOString()}] ${req.method} ${req.path}`);
+    console.log('Content-Type:', req.headers['content-type']);
+    console.log('Body received:', req.body ? '✓ YES' : '✗ NO');
+  }
+  next();
+});
 
 // CORS Configuration - Allow frontend origins
 // app.use(cors({
