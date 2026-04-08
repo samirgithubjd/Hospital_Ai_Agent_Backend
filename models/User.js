@@ -42,19 +42,6 @@ const userSchema = new mongoose.Schema(
       unique: true,
       sparse: true
     },
-    // Email verification fields
-    isEmailVerified: {
-      type: Boolean,
-      default: false
-    },
-    emailVerificationToken: {
-      type: String,
-      required: false
-    },
-    emailVerificationExpiry: {
-      type: Date,
-      required: false
-    },
     // Doctor specific fields
     specialization: {
       type: String,

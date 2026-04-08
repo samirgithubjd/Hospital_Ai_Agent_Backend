@@ -118,26 +118,31 @@ router.post('/', async (req, res) => {
  */
 router.post('/check-slots-availability', async (req, res) => {
   try {
-    // console.log('📥 Raw Slots Request Body:', JSON.stringify(req.body, null, 2));
+    console.log('📥 Raw Slots Request Body:', JSON.stringify(req.body, null, 2));
     
-    // Extract payload in multiple formats (for VAPI compatibility)
+    // 1. Extract from VAPI webhook structure (VAPI tool-calls format)
+    let toolCallId = null;
     let payload = req.body;
-    console.log('-----------slot payload--------:', payload);
     
-    // If parameters are nested in 'input' object
-    if (req.body.input) {
+    if (req.body?.message?.toolCallList?.[0]) {
+      // VAPI webhook format
+      const toolCall = req.body.message.toolCallList[0];
+      toolCallId = toolCall?.id || toolCall?.toolCallId;
+      payload = toolCall?.function?.arguments || {};
+      console.log('✅ VAPI Webhook Format Detected');
+      console.log('🔧 Extracted toolCallId:', toolCallId);
+      console.log('📤 Extracted Arguments:', JSON.stringify(payload, null, 2));
+    }
+    // 2. Legacy format: parameters nested in 'input' object
+    else if (req.body?.input) {
       payload = req.body.input;
-      console.log('input-payload:', payload);
-      
+      console.log('✅ Input Object Format Detected');
     }
-    // If parameters are nested in 'parameters' object
-    else if (req.body.parameters) {
+    // 3. Legacy format: parameters nested in 'parameters' object
+    else if (req.body?.parameters) {
       payload = req.body.parameters;
-      console.log('nested-payload:', payload);
-
+      console.log('✅ Parameters Object Format Detected');
     }
-    
-    console.log('📤 Extracted Slots Payload:', JSON.stringify(payload, null, 2));
     
     const { 
       doctorId, 
@@ -145,55 +150,74 @@ router.post('/check-slots-availability', async (req, res) => {
       date, 
       specialty, 
       specialization, 
-      preferredDoctorId,
-      preferred_doctor_id,
       limit = 10,
       includeAlternatives = true 
     } = payload;
 
     // Validation
     if (!date) {
-      return res.status(400).json({
+      const errorResult = {
         success: false,
-        error: 'Date is required (format: YYYY-MM-DD)'
-      });
+        error: 'Date is required (format: YYYY-MM-DD)',
+        availabilityStatus: 'invalid_query'
+      };
+      
+      if (toolCallId) {
+        return res.status(200).json({
+          results: [{
+            toolCallId: toolCallId,
+            result: errorResult
+          }]
+        });
+      }
+      return res.status(400).json(errorResult);
     }
 
     const searchDate = new Date(date);
     searchDate.setHours(0, 0, 0, 0);
     const nextDay = new Date(searchDate.getTime() + 86400000);
 
-    const finalPreferredDoctorId = preferredDoctorId || preferred_doctor_id || doctorId || doctor_id;
+    const finalDoctorId = doctorId || doctor_id;
     const finalSpecialty = specialty || specialization;
 
-    console.log('📅 VAPI Check Slots Availability (Enhanced):', {
+    console.log('📅 VAPI Check Slots Availability:', {
       date,
-      preferredDoctorId: finalPreferredDoctorId,
+      doctorId: finalDoctorId,
       specialty: finalSpecialty,
-      includeAlternatives,
       limit
     });
 
     // ============================================
-    // SCENARIO 1: Check preferred doctor's slots
+    // SCENARIO 1: Check specific doctor's slots by ID
     // ============================================
-    if (finalPreferredDoctorId) {
-      const preferredDoctor = await User.findById(finalPreferredDoctorId).select(
+    if (finalDoctorId) {
+      const doctor = await User.findById(finalDoctorId).select(
         'firstName lastName specialization phone email role isActive'
       );
 
-      if (!preferredDoctor || preferredDoctor.role !== 'doctor') {
-        return res.status(404).json({
+      if (!doctor || doctor.role !== 'doctor') {
+        const errorResult = {
           success: false,
-          error: `Doctor not found with ID: ${finalPreferredDoctorId}`
-        });
+          error: `Doctor not found with ID: ${finalDoctorId}`,
+          availabilityStatus: 'doctor_not_found'
+        };
+        
+        if (toolCallId) {
+          return res.status(200).json({
+            results: [{
+              toolCallId: toolCallId,
+              result: errorResult
+            }]
+          });
+        }
+        return res.status(404).json(errorResult);
       }
 
-      console.log(`🎯 Checking preferred doctor: ${preferredDoctor.firstName} ${preferredDoctor.lastName}`);
+      console.log(`🎯 Checking slots for doctor: ${doctor.firstName} ${doctor.lastName}`);
 
-      // Get preferred doctor's slots
-      const preferredSlots = await Slot.find({
-        doctorId: finalPreferredDoctorId,
+      // Get doctor's slots
+      const doctorSlots = await Slot.find({
+        doctorId: finalDoctorId,
         date: {
           $gte: searchDate,
           $lt: nextDay
@@ -204,10 +228,10 @@ router.post('/check-slots-availability', async (req, res) => {
         .sort({ startTime: 1 })
         .limit(limit);
 
-      // Format preferred doctor's slots
-      const formattedPreferredSlots = preferredSlots.map(slot => ({
-        slotId: slot._id,
-        doctorId: slot.doctorId._id,
+      // Format slots
+      const formattedSlots = doctorSlots.map(slot => ({
+        slotId: slot._id.toString(),
+        doctorId: slot.doctorId._id.toString(),
         doctorName: `${slot.doctorId.firstName} ${slot.doctorId.lastName}`,
         specialty: slot.doctorId.specialization,
         doctorPhone: slot.doctorId.phone,
@@ -222,163 +246,34 @@ router.post('/check-slots-availability', async (req, res) => {
         fee: slot.fee || 0,
         duration: slot.slotDuration,
         location: slot.location || 'Not specified',
-        isAvailable: slot.isAvailable,
-        isBooked: !slot.isAvailable,
-        isPreferred: true
+        isAvailable: slot.isAvailable
       }));
 
-      // ======================================================
-      // If preferred doctor has slots, return them directly
-      // ======================================================
-      if (formattedPreferredSlots.length > 0) {
+      const slotResult = {
+        success: true,
+        availabilityStatus: formattedSlots.length > 0 ? 'available' : 'no_availability',
+        date: date,
+        doctorId: finalDoctorId,
+        doctorName: `${doctor.firstName} ${doctor.lastName}`,
+        specialty: doctor.specialization,
+        slotCount: formattedSlots.length,
+        availableSlots: formattedSlots,
+        message: formattedSlots.length > 0 
+          ? `✅ Found ${formattedSlots.length} available slots with ${doctor.firstName} ${doctor.lastName} on ${date}`
+          : `❌ No available slots with ${doctor.firstName} ${doctor.lastName} on ${date}`
+      };
+      
+      if (toolCallId) {
         return res.status(200).json({
-          success: true,
-          date: date,
-          availabilityStatus: 'available_and_confirmed',
-          realTimeCheckPerformed: true,
-          preferredDoctorSchedule: {
-            doctorId: preferredDoctor._id,
-            doctorName: `${preferredDoctor.firstName} ${preferredDoctor.lastName}`,
-            specialty: preferredDoctor.specialization,
-            slotCount: formattedPreferredSlots.length,
-            slots: formattedPreferredSlots,
-            availabilityConfirmed: true
-          },
-          alternatives: null,
-          slotType: 'preferred',
-          note: 'Real-time availability confirmed. Slots are actively monitored. When you book, the system will atomically reserve the slot to prevent double-booking.',
-          message: `✅ Found ${formattedPreferredSlots.length} available slots with preferred doctor ${preferredDoctor.firstName} ${preferredDoctor.lastName}`
+          results: [{
+            toolCallId: toolCallId,
+            result: slotResult
+          }]
         });
       }
-
-      // ======================================================
-      // If preferred doctor has NO slots & includeAlternatives
-      // ======================================================
-      if (includeAlternatives) {
-        console.log(`⚠️  No slots for ${preferredDoctor.firstName}. Fetching alternatives...`);
-
-        // Get other doctors with same specialty
-        const alternativeDoctors = await User.find({
-          role: 'doctor',
-          isActive: true,
-          specialization: new RegExp(preferredDoctor.specialization, 'i'),
-          _id: { $ne: finalPreferredDoctorId } // Exclude preferred doctor
-        }).select('_id');
-
-        if (alternativeDoctors.length === 0) {
-          return res.status(200).json({
-            success: true,
-            date: date,
-            availabilityStatus: 'no_availability',
-            realTimeCheckPerformed: true,
-            preferredDoctorSchedule: {
-              doctorId: preferredDoctor._id,
-              doctorName: `${preferredDoctor.firstName} ${preferredDoctor.lastName}`,
-              specialty: preferredDoctor.specialization,
-              slotCount: 0,
-              slots: [],
-              status: 'unavailable'
-            },
-            alternatives: null,
-            slotType: 'no_preference_no_alternatives',
-            note: 'No alternatives available. Try another date or specialty.',
-            message: `❌ ${preferredDoctor.firstName} ${preferredDoctor.lastName} has no available slots on ${date}, and no other ${preferredDoctor.specialization} doctors are available.`
-          });
-        }
-
-        const alternativeDoctorIds = alternativeDoctors.map(doc => doc._id);
-
-        // Get alternative slots
-        const alternativeSlots = await Slot.find({
-          doctorId: { $in: alternativeDoctorIds },
-          date: {
-            $gte: searchDate,
-            $lt: nextDay
-          },
-          isAvailable: true
-        })
-          .populate('doctorId', 'firstName lastName specialization phone email')
-          .sort({ startTime: 1 })
-          .limit(limit * 2); // Get more alternatives
-
-        // Group alternatives by doctor
-        const groupedByDoctor = {};
-        alternativeSlots.forEach(slot => {
-          const docId = slot.doctorId._id.toString();
-          if (!groupedByDoctor[docId]) {
-            groupedByDoctor[docId] = {
-              doctorId: slot.doctorId._id,
-              doctorName: `${slot.doctorId.firstName} ${slot.doctorId.lastName}`,
-              specialty: slot.doctorId.specialization,
-              doctorPhone: slot.doctorId.phone,
-              doctorEmail: slot.doctorId.email,
-              slots: []
-            };
-          }
-          groupedByDoctor[docId].slots.push({
-            slotId: slot._id,
-            date: date,
-            time: slot.startTime,
-            timeFormatted: new Date(`2000-01-01T${slot.startTime}`).toLocaleTimeString('en-US', {
-              hour: '2-digit',
-              minute: '2-digit',
-              hour12: true
-            }),
-            fee: slot.fee || 0,
-            duration: slot.slotDuration,
-            location: slot.location || 'Not specified',
-            isAvailable: slot.isAvailable,
-            isBooked: !slot.isAvailable
-          });
-        });
-
-        const alternativesArray = Object.values(groupedByDoctor);
-
-        return res.status(200).json({
-          success: true,
-          date: date,
-          availabilityStatus: 'alternatives_available',
-          realTimeCheckPerformed: true,
-          preferredDoctorSchedule: {
-            doctorId: preferredDoctor._id,
-            doctorName: `${preferredDoctor.firstName} ${preferredDoctor.lastName}`,
-            specialty: preferredDoctor.specialization,
-            slotCount: 0,
-            slots: [],
-            status: 'unavailable'
-          },
-          alternatives: {
-            alternativeCount: alternativesArray.length,
-            totalAlternativeSlots: alternativeSlots.length,
-            doctorsList: alternativesArray,
-            availabilityConfirmed: true
-          },
-          slotType: 'alternatives_suggested',
-          note: 'Real-time availability confirmed for alternatives. Each slot is reserved atomically upon booking to prevent conflicts.',
-          message: `❌ No slots available for ${preferredDoctor.firstName} ${preferredDoctor.lastName}. 
-            However, we found available slots with ${alternativesArray.length} other ${preferredDoctor.specialization} doctor(s). 
-            Would you like to book with another doctor instead?`
-        });
-      }
-
-      // No alternatives & no preferred slots
       return res.status(200).json({
         success: true,
-        date: date,
-        availabilityStatus: 'no_availability',
-        realTimeCheckPerformed: true,
-        preferredDoctorSchedule: {
-          doctorId: preferredDoctor._id,
-          doctorName: `${preferredDoctor.firstName} ${preferredDoctor.lastName}`,
-          specialty: preferredDoctor.specialization,
-          slotCount: 0,
-          slots: [],
-          status: 'unavailable'
-        },
-        alternatives: null,
-        slotType: 'no_slots_no_alternatives',
-        note: 'No available slots found. Please try another date or doctor.',
-        message: `❌ No available slots for ${preferredDoctor.firstName} ${preferredDoctor.lastName} on ${date}`
+        result: slotResult
       });
     }
 
@@ -396,40 +291,41 @@ router.post('/check-slots-availability', async (req, res) => {
       const doctorIds = doctors.map(doc => doc._id);
 
       if (doctorIds.length === 0) {
-        return res.status(200).json({
+        const errorResult = {
           success: true,
+          availabilityStatus: 'no_doctors',
           date: date,
-          availabilityStatus: 'no_doctors_available',
-          realTimeCheckPerformed: true,
           slotCount: 0,
           availableSlots: [],
-          doctorCount: 0,
-          note: 'No doctors with this specialization are available.',
-          message: `❌ No doctors available with specialization "${finalSpecialty}" on ${date}`
-        });
+          message: `❌ No doctors available with specialization "${finalSpecialty}"`
+        };
+        
+        if (toolCallId) {
+          return res.status(200).json({
+            results: [{
+              toolCallId: toolCallId,
+              result: errorResult
+            }]
+          });
+        }
+        return res.status(200).json(errorResult);
       }
 
-      const query = {
+      const slots = await Slot.find({
         doctorId: { $in: doctorIds },
         date: {
           $gte: searchDate,
           $lt: nextDay
         },
         isAvailable: true
-      };
-
-      // Fetch slots with doctor details
-      const slots = await Slot.find(query)
+      })
         .populate('doctorId', 'firstName lastName specialization phone email')
         .sort({ startTime: 1 })
         .limit(limit);
 
-      console.log(`✅ Found ${slots.length} available slots on ${date}`);
-
-      // Format response for VAPI
       const formattedSlots = slots.map(slot => ({
-        slotId: slot._id,
-        doctorId: slot.doctorId._id,
+        slotId: slot._id.toString(),
+        doctorId: slot.doctorId._id.toString(),
         doctorName: `${slot.doctorId.firstName} ${slot.doctorId.lastName}`,
         specialty: slot.doctorId.specialization,
         doctorPhone: slot.doctorId.phone,
@@ -444,43 +340,72 @@ router.post('/check-slots-availability', async (req, res) => {
         fee: slot.fee || 0,
         duration: slot.slotDuration,
         location: slot.location || 'Not specified',
-        isAvailable: slot.isAvailable,
-        isBooked: !slot.isAvailable
+        isAvailable: slot.isAvailable
       }));
 
-      return res.status(200).json({
+      const slotResult = {
         success: true,
+        availabilityStatus: formattedSlots.length > 0 ? 'available' : 'no_availability',
         date: date,
-        availabilityStatus: formattedSlots.length > 0 ? 'available_and_confirmed' : 'no_availability',
-        realTimeCheckPerformed: true,
-        doctorCount: doctors.length,
+        specialty: finalSpecialty,
         slotCount: formattedSlots.length,
         availableSlots: formattedSlots,
-        specialty: finalSpecialty,
-        note: formattedSlots.length > 0 ? 'Real-time availability confirmed. Each slot is reserved atomically upon booking.' : 'No slots currently available. Check again later or try another date.',
-        message: formattedSlots.length > 0 
-          ? `✅ Found ${formattedSlots.length} available slots from ${new Set(formattedSlots.map(s => s.doctorName)).size} doctor(s) in ${finalSpecialty}`
-          : `❌ No available slots found for ${finalSpecialty} on ${date}`
+        message: formattedSlots.length > 0
+          ? `✅ Found ${formattedSlots.length} available slots from ${doctor.firstName} ${doctor.lastName} in ${finalSpecialty} on ${date}`
+          : `❌ No available slots in ${finalSpecialty} on ${date}`
+      };
+      
+      if (toolCallId) {
+        return res.status(200).json({
+          results: [{
+            toolCallId: toolCallId,
+            result: slotResult
+          }]
+        });
+      }
+      return res.status(200).json({
+        success: true,
+        result: slotResult
       });
     }
 
     // No valid parameters
-    return res.status(400).json({
+    const errorResult = {
       success: false,
-      error: 'Either doctorId/preferredDoctorId or specialty is required',
+      error: 'Either doctorId or specialty is required',
       availabilityStatus: 'invalid_query'
-    });
+    };
+    
+    if (toolCallId) {
+      return res.status(200).json({
+        results: [{
+          toolCallId: toolCallId,
+          result: errorResult
+        }]
+      });
+    }
+    return res.status(400).json(errorResult);
 
   } catch (error) {
-    console.log('check slots error:', error);
-    
     console.error('❌ Check Slots Availability Error:', error.message);
-    res.status(500).json({
+    
+    const errorResult = {
       success: false,
       error: error.message,
       availableSlots: [],
       availabilityStatus: 'error'
-    });
+    };
+    
+    const toolCallId = req.body?.message?.toolCallList?.[0]?.id;
+    if (toolCallId) {
+      return res.status(200).json({
+        results: [{
+          toolCallId: toolCallId,
+          result: errorResult
+        }]
+      });
+    }
+    return res.status(500).json(errorResult);
   }
 });
 
@@ -528,87 +453,115 @@ router.post('/check-slots-availability', async (req, res) => {
  *   }
  * }
  */
+/**
+ * @route   POST /api/vapi-tools/check-patient
+ * @desc    Check if patient exists (VAPI Webhook)
+ * @access  Public (No Auth Required - VAPI Tool Call)
+ * 
+ * VAPI sends webhook in this format:
+ * {
+ *   "message": {
+ *     "type": "tool-calls",
+ *     "toolCallList": [{
+ *       "id": "toolcall_abc123",
+ *       "function": {
+ *         "name": "check-patient",
+ *         "arguments": { "phone": "9098765432" }
+ *       }
+ *     }]
+ *   }
+ * }
+ * 
+ * Response format:
+ * {
+ *   "results": [{
+ *     "toolCallId": "toolcall_abc123",
+ *     "result": { "success": true, "found": true, ... }
+ *   }]
+ * }
+ */
 router.post('/check-patient', async (req, res) => {
   try {
-    console.log('📥 Raw Request Body:', req.body);
-    console.log('📥 Body Type:', typeof req.body);
-    console.log('📥 Body Keys:', Object.keys(req.body || {}));
-    console.log('📥 Content-Type Header:', req.headers['content-type']);
+    console.log('📥 Raw Request Body:', JSON.stringify(req.body, null, 2));
     
-    // Handle multiple payload formats
-    let payload = {};
+    // Extract toolCallId and arguments from VAPI webhook structure
+    const toolCall = req.body?.message?.toolCallList?.[0];
+    const toolCallId = toolCall?.id || toolCall?.toolCallId || 'unknown-tool-call';
+    const functionArgs = toolCall?.function?.arguments || {};
+
+    console.log('🔧 Extracted toolCallId:', toolCallId);
+    console.log('📤 Extracted Arguments:', JSON.stringify(functionArgs, null, 2));
+
+    // Handle fallback format (direct call - not from VAPI webhook)
+    let payload = functionArgs;
     
-    // Check if body is completely empty
-    if (!req.body || (typeof req.body === 'object' && Object.keys(req.body).length === 0)) {
-      console.warn('⚠️ Request body is empty!');
-      const errorResponse = {
-        found: false,
-        isExisting: false,
-        error: 'Request body is empty. Please send JSON with Content-Type: application/json',
-        expectedFormat: {
-          option1: { phone: '1234567890' },
-          option2: { phoneNumber: '1234567890' },
-          option3: { email: 'user@example.com' }
-        }
-      };
-      return res.status(400).json({
-        success: false,
-        result: errorResponse
-      });
+    // If no function arguments, try alternative formats
+    if (!payload || Object.keys(payload).length === 0) {
+      if (req.body.input) {
+        payload = req.body.input;
+        console.log('✓ Using VAPI input format (fallback)');
+      } else if (req.body.parameters) {
+        payload = req.body.parameters;
+        console.log('✓ Using parameters format (fallback)');
+      } else if (req.body.phone || req.body.email) {
+        payload = req.body;
+        console.log('✓ Using direct format (fallback)');
+      }
     }
-    
-    // Extract payload from various formats
-    if (req.body.input) {
-      // VAPI format: { toolUse: { input: { ... } } }
-      payload = req.body.input;
-      console.log('✓ Using VAPI input format');
-    } else if (req.body.parameters) {
-      // Alternative format: { parameters: { ... } }
-      payload = req.body.parameters;
-      console.log('✓ Using parameters format');
-    } else if (req.body.data) {
-      // Another format: { data: { phone, email } }
-      payload = req.body.data;
-      console.log('✓ Using data wrapper format');
-    } else {
-      // Direct format: { phone: "123", email: "..." }
-      payload = req.body;
-      console.log('✓ Using direct format');
-    }
-    
-    console.log('📤 Extracted Payload:', JSON.stringify(payload, null, 2));
-    
-    // Final validation
+
+    console.log('📤 Final Extracted Payload:', JSON.stringify(payload, null, 2));
+
+    // Validation
     if (!payload || (typeof payload === 'object' && Object.keys(payload).length === 0)) {
-      const errorResponse = {
-        found: false,
-        isExisting: false,
-        error: 'Payload is empty after extraction'
-      };
-      return res.status(400).json({
-        success: false,
-        result: errorResponse
+      console.warn('⚠️ No arguments found in request');
+      return res.status(200).json({
+        results: [
+          {
+            toolCallId: toolCallId,
+            result: {
+              success: false,
+              error: 'No patient data provided',
+              found: false,
+              isExisting: false
+            }
+          }
+        ]
       });
     }
-    
-    // Call the handler
+
+    // Call the handler to check patient
     const result = await handleCheckPatient(payload);
-    
-    // Return response in VAPI-compatible format
-    res.status(200).json({
-      success: true,
-      result: result  // VAPI expects 'result' field
+
+    console.log('✅ Check Patient Result:', JSON.stringify(result, null, 2));
+
+    // Return response in VAPI-required format
+    return res.status(200).json({
+      results: [
+        {
+          toolCallId: toolCallId,
+          result: result
+        }
+      ]
     });
-    
+
   } catch (error) {
     console.error('❌ Check Patient Error:', error.message);
-    res.status(500).json({
-      success: false,
-      result: {
-        error: error.message,
-        found: false,
-        isExisting: false
-      }
+    console.error('❌ Stack:', error.stack);
+    
+    const toolCallId = req.body?.message?.toolCallList?.[0]?.id || 'unknown-tool-call';
+    
+    return res.status(200).json({
+      results: [
+        {
+          toolCallId: toolCallId,
+          result: {
+            success: false,
+            error: error.message,
+            found: false,
+            isExisting: false
+          }
+        }
+      ]
     });
   }
 });
@@ -621,11 +574,34 @@ router.post('/check-patient', async (req, res) => {
  */
 router.post('/find-doctor', async (req, res) => {
   try {
-    console.log('📥 Raw Request Body:', req.body);
+    console.log('📥 Raw Request Body:', JSON.stringify(req.body, null, 2));
     
+    // 1. Extract from VAPI webhook structure (VAPI tool-calls format)
+    let toolCallId = null;
     let payload = req.body;
-    if (req.body && req.body.input) payload = req.body.input;
-    else if (req.body && req.body.parameters) payload = req.body.parameters;
+    
+    if (req.body?.message?.toolCallList?.[0]) {
+      // VAPI webhook format
+      const toolCall = req.body.message.toolCallList[0];
+      toolCallId = toolCall?.id || toolCall?.toolCallId;
+      payload = toolCall?.function?.arguments || {};
+      console.log('✅ VAPI Webhook Format Detected');
+      console.log('🔧 Extracted toolCallId:', toolCallId);
+      console.log('📤 Extracted Arguments:', JSON.stringify(payload, null, 2));
+    }
+    // 2. Legacy format: parameters nested in 'input' object
+    else if (req.body?.input) {
+      payload = req.body.input;
+      console.log('✅ Input Object Format Detected');
+      console.log('📤 Extracted Payload:', JSON.stringify(payload, null, 2));
+    }
+    // 3. Legacy format: parameters nested in 'parameters' object
+    else if (req.body?.parameters) {
+      payload = req.body.parameters;
+      console.log('✅ Parameters Object Format Detected');
+      console.log('📤 Extracted Payload:', JSON.stringify(payload, null, 2));
+    }
+    // 4. Direct call format (all parameters at root)
     else if (!req.body || Object.keys(req.body).length === 0) {
       return res.status(400).json({
         success: false,
@@ -633,15 +609,42 @@ router.post('/find-doctor', async (req, res) => {
       });
     }
     
-    console.log('📤 Extracted Payload:', JSON.stringify(payload, null, 2));
-    
     const result = await handleFindDoctor(payload);
+    
+    // Return VAPI format if this was a VAPI webhook call
+    if (toolCallId) {
+      return res.status(200).json({
+        results: [{
+          toolCallId: toolCallId,
+          result: result
+        }]
+      });
+    }
+    
+    // Return legacy format for direct calls
     res.status(200).json({
       success: true,
       result: result
     });
   } catch (error) {
     console.error('❌ Find Doctor Error:', error.message);
+    
+    // If this was a VAPI webhook call, return error in VAPI format
+    const toolCallId = req.body?.message?.toolCallList?.[0]?.id;
+    if (toolCallId) {
+      return res.status(200).json({
+        results: [{
+          toolCallId: toolCallId,
+          result: {
+            error: error.message,
+            found: false,
+            doctors: []
+          }
+        }]
+      });
+    }
+    
+    // Return legacy format for direct calls
     res.status(500).json({
       success: false,
       result: {
@@ -674,18 +677,32 @@ router.post('/find-doctor', async (req, res) => {
  */
 router.post('/check-doctor-availability', async (req, res) => {
   try {
-    console.log('📥 Raw Request Body:', req.body);
+    console.log('📥 Raw Request Body:', JSON.stringify(req.body, null, 2));
     
-    // Extract payload in multiple formats (for VAPI compatibility)
+    // 1. Extract from VAPI webhook structure (VAPI tool-calls format)
+    let toolCallId = null;
     let payload = req.body;
     
-    // If parameters are nested in 'input' object
-    if (req.body && req.body.input) {
-      payload = req.body.input;
+    if (req.body?.message?.toolCallList?.[0]) {
+      // VAPI webhook format
+      const toolCall = req.body.message.toolCallList[0];
+      toolCallId = toolCall?.id || toolCall?.toolCallId;
+      payload = toolCall?.function?.arguments || {};
+      console.log('✅ VAPI Webhook Format Detected');
+      console.log('🔧 Extracted toolCallId:', toolCallId);
+      console.log('📤 Extracted Arguments:', JSON.stringify(payload, null, 2));
     }
-    // If parameters are nested in 'parameters' object
-    else if (req.body && req.body.parameters) {
+    // 2. Legacy format: parameters nested in 'input' object
+    else if (req.body?.input) {
+      payload = req.body.input;
+      console.log('✅ Input Object Format Detected');
+      console.log('📤 Extracted Payload:', JSON.stringify(payload, null, 2));
+    }
+    // 3. Legacy format: parameters nested in 'parameters' object
+    else if (req.body?.parameters) {
       payload = req.body.parameters;
+      console.log('✅ Parameters Object Format Detected');
+      console.log('📤 Extracted Payload:', JSON.stringify(payload, null, 2));
     }
     
     if (!payload || Object.keys(payload).length === 0) {
@@ -695,17 +712,44 @@ router.post('/check-doctor-availability', async (req, res) => {
       });
     }
     
-    console.log('📤 Extracted Payload:', JSON.stringify(payload, null, 2));
+    console.log('📤 Final Extracted Payload:', JSON.stringify(payload, null, 2));
     
     const result = await handleCheckDoctorAvailability(payload);
     console.log('>>>>>>>>>>check dr available<<<<<<<<<<<<<<:', result);
     
+    // Return VAPI format if this was a VAPI webhook call
+    if (toolCallId) {
+      return res.status(200).json({
+        results: [{
+          toolCallId: toolCallId,
+          result: result
+        }]
+      });
+    }
+    
+    // Return legacy format for direct calls
     res.status(200).json({
       success: !result.error,
       result: result
     });
   } catch (error) {
     console.error('❌ Check Doctor Availability Error:', error.message);
+    
+    // If this was a VAPI webhook call, return error in VAPI format
+    const toolCallId = req.body?.message?.toolCallList?.[0]?.id;
+    if (toolCallId) {
+      return res.status(200).json({
+        results: [{
+          toolCallId: toolCallId,
+          result: {
+            error: error.message,
+            available: false
+          }
+        }]
+      });
+    }
+    
+    // Return legacy format for direct calls
     res.status(500).json({
       success: false,
       result: {
@@ -755,31 +799,210 @@ router.post('/check-doctor-availability', async (req, res) => {
  *   "message": "✅ Found 5 available doctors"
  * }
  */
+
+/**
+ * @route   POST /api/vapi-tools/book-appointment
+ * @desc    Book appointment for patient via VAPI (NO AUTH REQUIRED - for phone/IVR bookings)
+ * @access  Public (No Token Required - Direct VAPI/Phone Integration)
+ * @body    { slotId, doctorId, date, time, patientPhone, patientId, symptoms }
+ * @example
+ * VAPI Webhook Request:
+ * {
+ *   "message": {
+ *     "type": "tool-calls",
+ *     "toolCallList": [{
+ *       "id": "toolcall_book123",
+ *       "function": {
+ *         "name": "book-appointment",
+ *         "arguments": {
+ *           "slotId": "507f1f77bcf86cd799439011",
+ *           "doctorId": "507f1f77bcf86cd799439012",
+ *           "date": "2024-04-15",
+ *           "time": "10:00",
+ *           "patientPhone": "9098765432",
+ *           "symptoms": "Chest pain"
+ *         }
+ *       }
+ *     }]
+ *   }
+ * }
+ * 
+ * OR with existing patientId:
+ * {
+ *   "slotId": "507f1f77bcf86cd799439011",
+ *   "doctorId": "507f1f77bcf86cd799439012",
+ *   "date": "2024-04-15",
+ *   "time": "10:00",
+ *   "patientId": "507f77bcf86cd799439015",
+ *   "symptoms": "Chest pain"
+ * }
+ * 
+ * Response:
+ * {
+ *   "results": [{
+ *     "toolCallId": "toolcall_book123",
+ *     "result": {
+ *       "success": true,
+ *       "appointmentId": "507f1f77bcf86cd799439020",
+ *       "status": "scheduled",
+ *       "patientName": "John Doe",
+ *       "patientPhone": "9098765432",
+ *       "doctorName": "Dr. John Doe",
+ *       "date": "2024-04-15",
+ *       "time": "10:00",
+ *       "message": "✅ Appointment confirmed! Your appointment is scheduled."
+ *     }
+ *   }]
+ * }
+ */
+router.post('/book-appointment', async (req, res) => {
+  try {
+    console.log('📥 Raw Book Appointment Request Body:', JSON.stringify(req.body, null, 2));
+    
+    // 1. Extract from VAPI webhook structure (VAPI tool-calls format)
+    let toolCallId = null;
+    let payload = req.body;
+    
+    if (req.body?.message?.toolCallList?.[0]) {
+      // VAPI webhook format
+      const toolCall = req.body.message.toolCallList[0];
+      toolCallId = toolCall?.id || toolCall?.toolCallId;
+      payload = toolCall?.function?.arguments || {};
+      console.log('✅ VAPI Webhook Format Detected');
+      console.log('🔧 Extracted toolCallId:', toolCallId);
+      console.log('📤 Extracted Arguments:', JSON.stringify(payload, null, 2));
+    }
+    // 2. Legacy format: parameters nested in 'input' object
+    else if (req.body?.input) {
+      payload = req.body.input;
+      console.log('✅ Input Object Format Detected');
+    }
+    // 3. Legacy format: parameters nested in 'parameters' object
+    else if (req.body?.parameters) {
+      payload = req.body.parameters;
+      console.log('✅ Parameters Object Format Detected');
+    }
+
+    const result = await handleBookAppointmentVapi(payload);
+    
+    // Return VAPI format if this was a VAPI webhook call
+    if (toolCallId) {
+      return res.status(200).json({
+        results: [{
+          toolCallId: toolCallId,
+          result: result
+        }]
+      });
+    }
+    
+    // Return legacy format for direct calls
+    res.status(result.error ? 400 : 200).json({
+      success: !result.error,
+      result: result
+    });
+  } catch (error) {
+    console.error('❌ Book Appointment Error:', error.message);
+    
+    // If this was a VAPI webhook call, return error in VAPI format
+    const toolCallId = req.body?.message?.toolCallList?.[0]?.id;
+    if (toolCallId) {
+      return res.status(200).json({
+        results: [{
+          toolCallId: toolCallId,
+          result: {
+            success: false,
+            error: error.message,
+            status: 'error'
+          }
+        }]
+      });
+    }
+    
+    // Return legacy format for direct calls
+    res.status(500).json({
+      success: false,
+      result: {
+        error: error.message,
+        status: 'error'
+      }
+    });
+  }
+});
+
 router.post('/list-doctors', async (req, res) => {
   try {
     console.log('📥 Raw List Doctors Request Body:', JSON.stringify(req.body, null, 2));
     
-    // Extract payload in multiple formats (for VAPI compatibility)
+    // 1. Extract from VAPI webhook structure (VAPI tool-calls format)
+    let toolCallId = null;
     let payload = req.body;
     
-    // If parameters are nested in 'input' object
-    if (req.body.input) {
-      payload = req.body.input;
+    if (req.body?.message?.toolCallList?.[0]) {
+      // VAPI webhook format
+      const toolCall = req.body.message.toolCallList[0];
+      toolCallId = toolCall?.id || toolCall?.toolCallId;
+      payload = toolCall?.function?.arguments || {};
+      console.log('✅ VAPI Webhook Format Detected');
+      console.log('🔧 Extracted toolCallId:', toolCallId);
+      console.log('📤 Extracted Arguments:', JSON.stringify(payload, null, 2));
     }
-    // If parameters are nested in 'parameters' object
-    else if (req.body.parameters) {
+    // 2. Legacy format: parameters nested in 'input' object
+    else if (req.body?.input) {
+      payload = req.body.input;
+      console.log('✅ Input Object Format Detected');
+      console.log('📤 Extracted Payload:', JSON.stringify(payload, null, 2));
+    }
+    // 3. Legacy format: parameters nested in 'parameters' object
+    else if (req.body?.parameters) {
       payload = req.body.parameters;
+      console.log('✅ Parameters Object Format Detected');
+      console.log('📤 Extracted Payload:', JSON.stringify(payload, null, 2));
     }
     
-    console.log('📤 Extracted List Doctors Payload:', JSON.stringify(payload, null, 2));
+    console.log('📤 Final Extracted Payload:', JSON.stringify(payload, null, 2));
     
     const result = await handleListDoctors(payload);
+    
+    // Return VAPI format if this was a VAPI webhook call
+    if (toolCallId) {
+      return res.status(200).json({
+        results: [{
+          toolCallId: toolCallId,
+          result: {
+            success: true,
+            result: result
+          }
+        }]
+      });
+    }
+    
+    // Return legacy format for direct calls
     res.status(200).json({
       success: !result.error,
       result: result
     });
   } catch (error) {
     console.error('❌ List Doctors Error:', error.message);
+    
+    // If this was a VAPI webhook call, return error in VAPI format
+    const toolCallId = req.body?.message?.toolCallList?.[0]?.id;
+    if (toolCallId) {
+      return res.status(200).json({
+        results: [{
+          toolCallId: toolCallId,
+          result: {
+            success: false,
+            result: {
+              error: error.message,
+              doctors: [],
+              totalDoctors: 0
+            }
+          }
+        }]
+      });
+    }
+    
+    // Return legacy format for direct calls
     res.status(500).json({
       success: false,
       result: {
@@ -820,14 +1043,32 @@ router.post('/list-doctors', async (req, res) => {
  */
 router.post('/register-patient', async (req, res) => {
   try {
-    console.log('📥 Raw Register Patient Request Body:', req.body);
+    console.log('📥 Raw Request Body:', JSON.stringify(req.body, null, 2));
     
-    // Extract payload in multiple formats (for VAPI compatibility)
+    // 1. Extract from VAPI webhook structure (VAPI tool-calls format)
+    let toolCallId = null;
     let payload = req.body;
-    if (req.body && req.body.input) {
+    
+    if (req.body?.message?.toolCallList?.[0]) {
+      // VAPI webhook format
+      const toolCall = req.body.message.toolCallList[0];
+      toolCallId = toolCall?.id || toolCall?.toolCallId;
+      payload = toolCall?.function?.arguments || {};
+      console.log('✅ VAPI Webhook Format Detected');
+      console.log('🔧 Extracted toolCallId:', toolCallId);
+      console.log('📤 Extracted Arguments:', JSON.stringify(payload, null, 2));
+    }
+    // 2. Legacy format: parameters nested in 'input' object
+    else if (req.body?.input) {
       payload = req.body.input;
-    } else if (req.body && req.body.parameters) {
+      console.log('✅ Input Object Format Detected');
+      console.log('📤 Extracted Payload:', JSON.stringify(payload, null, 2));
+    }
+    // 3. Legacy format: parameters nested in 'parameters' object
+    else if (req.body?.parameters) {
       payload = req.body.parameters;
+      console.log('✅ Parameters Object Format Detected');
+      console.log('📤 Extracted Payload:', JSON.stringify(payload, null, 2));
     }
     
     if (!payload || Object.keys(payload).length === 0) {
@@ -837,16 +1078,43 @@ router.post('/register-patient', async (req, res) => {
       });
     }
     
-    console.log('📤 Extracted Register Patient Payload:', JSON.stringify(payload, null, 2));
+    console.log('📤 Final Extracted Payload:', JSON.stringify(payload, null, 2));
     
     const result = await handleRegisterPatient(payload);
     
+    // Return VAPI format if this was a VAPI webhook call
+    if (toolCallId) {
+      return res.status(200).json({
+        results: [{
+          toolCallId: toolCallId,
+          result: result
+        }]
+      });
+    }
+    
+    // Return legacy format for direct calls
     res.status(result.error ? 400 : 201).json({
       success: !result.error,
       result: result
     });
   } catch (error) {
     console.error('❌ Register Patient Error:', error.message);
+    
+    // If this was a VAPI webhook call, return error in VAPI format
+    const toolCallId = req.body?.message?.toolCallList?.[0]?.id;
+    if (toolCallId) {
+      return res.status(200).json({
+        results: [{
+          toolCallId: toolCallId,
+          result: {
+            success: false,
+            error: error.message
+          }
+        }]
+      });
+    }
+    
+    // Return legacy format for direct calls
     res.status(500).json({
       success: false,
       result: {
@@ -954,6 +1222,286 @@ async function handleCheckPatient(input) {
       error: error.message,
       found: false,
       isExisting: false
+    };
+  }
+}
+
+/**
+ * Tool: Book Appointment VAPI Version
+ * Books appointment by slotId OR (doctorId + date + time)
+ * Supports patient identification by patientId OR patientPhone
+ * For voice/phone bookings where auth token is not available
+ */
+async function handleBookAppointmentVapi(input) {
+  try {
+    const { 
+      slotId, 
+      doctorId, 
+      doctor_id, 
+      date, 
+      time, 
+      patientId, 
+      patient_id, 
+      patientPhone,
+      patient_phone,
+      symptoms, 
+      notes 
+    } = input;
+
+    const finalDoctorId = doctorId || doctor_id;
+    const finalPatientId = patientId || patient_id;
+    const finalPatientPhone = patientPhone || patient_phone;
+
+    console.log('📞 VAPI Book Appointment:', {
+      slotId,
+      doctorId: finalDoctorId,
+      date,
+      time,
+      patientId: finalPatientId,
+      patientPhone: finalPatientPhone,
+      symptoms
+    });
+
+    // ========================================
+    // STEP 1: VALIDATE INPUTS
+    // ========================================
+    if (!finalDoctorId || !date || !time) {
+      return {
+        success: false,
+        error: 'Missing required fields: doctorId, date, time',
+        status: 'validation_failed'
+      };
+    }
+
+    if (!finalPatientId && !finalPatientPhone) {
+      return {
+        success: false,
+        error: 'Either patientId or patientPhone required',
+        status: 'validation_failed'
+      };
+    }
+
+    // ========================================
+    // STEP 2: GET PATIENT (by ID or Phone)
+    // ========================================
+    let patient;
+
+    if (finalPatientId) {
+      // Look up by ID
+      patient = await User.findById(finalPatientId).select('_id firstName lastName email phone role');
+    } else if (finalPatientPhone) {
+      // Look up by phone
+      const cleanPhone = finalPatientPhone.replace(/\D/g, '');
+      patient = await User.findOne({
+        role: 'patient',
+        phone: { $regex: cleanPhone }
+      }).select('_id firstName lastName email phone role');
+
+      if (!patient) {
+        console.log('ℹ️  Patient not found by phone. Creating new patient record...');
+        // Patient doesn't exist - will be created with minimal info
+        // This is common for walk-in patients via IVR
+        return {
+          success: false,
+          error: `Patient not found with phone: ${finalPatientPhone}. Please check patient is registered.`,
+          status: 'patient_not_found',
+          suggestion: 'Patient must be registered before booking via phone'
+        };
+      }
+    }
+
+    if (!patient) {
+      return {
+        success: false,
+        error: 'Patient not found',
+        status: 'patient_not_found'
+      };
+    }
+
+    // ========================================
+    // STEP 3: VERIFY DOCTOR EXISTS
+    // ========================================
+    const doctor = await User.findById(finalDoctorId).select('_id firstName lastName specialization email phone role');
+
+    if (!doctor || doctor.role !== 'doctor') {
+      return {
+        success: false,
+        error: `Doctor not found with ID: ${finalDoctorId}`,
+        status: 'doctor_not_found'
+      };
+    }
+
+    // ========================================
+    // STEP 4: FIND & VALIDATE SLOT
+    // ========================================
+    const appointmentDate = new Date(date);
+    const [hours, minutes] = time.split(':');
+    appointmentDate.setHours(parseInt(hours), parseInt(minutes), 0, 0);
+
+    let slot;
+
+    // If slotId is provided, query by ID first (it's the unique identifier)
+    if (slotId) {
+      console.log('🔍 Querying slot by ID:', slotId);
+      slot = await Slot.findById(slotId).select('_id doctorId startTime date isAvailable slotDuration fee location');
+      
+      if (!slot) {
+        console.log('❌ Slot not found with ID:', slotId);
+        return {
+          success: false,
+          error: `Slot with ID ${slotId} not found`,
+          status: 'slot_not_found',
+          slotId: slotId
+        };
+      }
+
+      // Validate slot belongs to the right doctor
+      if (slot.doctorId.toString() !== finalDoctorId.toString()) {
+        console.log('❌ Slot belongs to different doctor');
+        return {
+          success: false,
+          error: `Slot belongs to a different doctor`,
+          status: 'wrong_doctor',
+          slotDoctorId: slot.doctorId,
+          requestedDoctorId: finalDoctorId
+        };
+      }
+
+      // Validate slot is still available
+      if (!slot.isAvailable) {
+        console.log('❌ Slot already booked');
+        return {
+          success: false,
+          error: 'Selected slot is no longer available (already booked)',
+          status: 'slot_unavailable',
+          slotId: slotId,
+          doctorName: `${doctor.firstName} ${doctor.lastName}`
+        };
+      }
+
+      console.log('✅ Slot found by ID and validated');
+    } else {
+      // No slotId provided - build query by doctor + date + time
+      const slotQuery = {
+        doctorId: finalDoctorId,
+        startTime: time,
+        date: {
+          $gte: new Date(date),
+          $lt: new Date(new Date(date).getTime() + 86400000)
+        },
+        isAvailable: true
+      };
+
+      console.log('🔍 Querying slot by doctor + date + time:', {
+        doctorId: finalDoctorId,
+        startTime: time,
+        date: date
+      });
+
+      slot = await Slot.findOne(slotQuery).select('_id doctorId startTime date isAvailable slotDuration fee location');
+
+      if (!slot) {
+        console.log('❌ No available slot found for the criteria');
+        return {
+          success: false,
+          error: 'No available slot found for the requested doctor, date and time',
+          status: 'slot_unavailable',
+          doctorName: `${doctor.firstName} ${doctor.lastName}`,
+          requestedTime: time,
+          requestedDate: date
+        };
+      }
+
+      console.log('✅ Slot found by criteria');
+    }
+
+    // ========================================
+    // STEP 5: CREATE APPOINTMENT
+    // ========================================
+    const appointment = new Appointment({
+      patientId: patient._id,
+      doctorId: finalDoctorId,
+      appointmentDate: appointmentDate,
+      appointmentTime: time,
+      symptoms: symptoms || 'General Checkup',
+      status: 'scheduled',
+      notes: notes || 'Booked via VAPI Phone System',
+      bookedVia: 'voice_agent',
+      bookedAt: new Date()
+    });
+
+    const savedAppointment = await appointment.save();
+    console.log('✅ Appointment Created:', savedAppointment._id);
+
+    // ========================================
+    // STEP 6: ATOMIC SLOT UPDATE (CRITICAL!)
+    // ========================================
+    const updatedSlot = await Slot.findByIdAndUpdate(
+      slot._id,
+      {
+        $set: {
+          isAvailable: false,
+          appointmentId: savedAppointment._id,
+          updatedAt: new Date()
+        }
+      },
+      { new: true, runValidators: true }
+    );
+
+    // If updatedSlot is null, slot was already booked
+    if (!updatedSlot) {
+      console.log('⚠️  RACE CONDITION: Slot booked by another patient!');
+      
+      // Cancel the appointment
+      await Appointment.findByIdAndUpdate(
+        savedAppointment._id,
+        { 
+          $set: { 
+            status: 'cancelled', 
+            cancellationReason: 'Slot booked by another user' 
+          } 
+        }
+      );
+
+      return {
+        success: false,
+        error: 'Slot was booked by another patient. Appointment cancelled.',
+        status: 'race_condition',
+        availability: false,
+        suggestion: 'Please select another time slot'
+      };
+    }
+
+    console.log('✅ Slot marked as booked');
+
+    // ========================================
+    // STEP 7: RETURN SUCCESS RESPONSE
+    // ========================================
+    return {
+      success: true,
+      appointmentId: savedAppointment._id.toString(),
+      status: 'scheduled',
+      patientName: `${patient.firstName} ${patient.lastName}`,
+      patientPhone: patient.phone,
+      patientEmail: patient.email,
+      doctorName: `Dr. ${doctor.firstName} ${doctor.lastName}`,
+      doctorSpecialization: doctor.specialization,
+      doctorPhone: doctor.phone,
+      date: date,
+      time: time,
+      symptoms: symptoms || 'General Checkup',
+      fee: slot.fee || 0,
+      duration: slot.slotDuration,
+      location: slot.location || 'Hospital',
+      message: `✅ Appointment confirmed! ${patient.firstName}, your appointment with Dr. ${doctor.lastName} is scheduled for ${date} at ${time}. A confirmation has been noted in the system.`
+    };
+  } catch (error) {
+    console.error('❌ Book Appointment VAPI Error:', error.message);
+    console.error('Stack:', error.stack);
+    return {
+      success: false,
+      error: error.message,
+      status: 'error'
     };
   }
 }
@@ -1351,18 +1899,61 @@ async function handleCheckSymptoms(input) {
  */
 async function handleCheckDoctorAvailability(input) {
   try {
-    const { doctorId, doctor_id } = input;
-    console.log('<--------------doctor-id----------->', doctorId, doctor_id);
-    
-    const finalDoctorId = doctorId || doctor_id;
+    const { doctorId, doctor_id, doctorName, doctor_name, name } = input;
+    let finalDoctorId = doctorId || doctor_id;
+    const doctorNameParam = doctorName || doctor_name || name;
+
+    console.log('👨‍⚕️  Checking Doctor Availability Input:', { 
+      doctorId: finalDoctorId, 
+      doctorName: doctorNameParam 
+    });
+
+    // If doctorId is a string that looks like a name (contains spaces or "Dr"), try to find by name
+    if (finalDoctorId && typeof finalDoctorId === 'string' && 
+        (finalDoctorId.includes(' ') || finalDoctorId.toLowerCase().startsWith('dr'))) {
+      console.log('⚠️  Received doctor name instead of ID. Attempting to find by name...');
+      
+      const cleanName = finalDoctorId.replace(/^dr\.\s+/i, '').trim();
+      const nameParts = cleanName.split(/\s+/);
+      
+      let query = { role: 'doctor' };
+      if (nameParts.length >= 2) {
+        query.$or = [
+          { 
+            firstName: { $regex: nameParts[0], $options: 'i' },
+            lastName: { $regex: nameParts.slice(1).join(' '), $options: 'i' }
+          },
+          { firstName: { $regex: nameParts[0], $options: 'i' } },
+          { lastName: { $regex: nameParts.slice(1).join(' '), $options: 'i' } }
+        ];
+      } else {
+        query.$or = [
+          { firstName: { $regex: nameParts[0], $options: 'i' } },
+          { lastName: { $regex: nameParts[0], $options: 'i' } }
+        ];
+      }
+      
+      const foundDoctor = await User.findOne(query);
+      if (foundDoctor) {
+        finalDoctorId = foundDoctor._id;
+        console.log('✅ Found doctor by name:', finalDoctorId);
+      } else {
+        console.log('❌ Could not find doctor by name:', cleanName);
+        return {
+          error: `Doctor "${cleanName}" not found. Please use the doctor ID from the list.`,
+          available: false,
+          message: '❌ Please select from the list of available doctors'
+        };
+      }
+    }
 
     // Validation
     if (!finalDoctorId) {
       console.log('❌ Doctor ID not provided');
       return {
-        error: 'Doctor ID is required',
+        error: 'Doctor ID is required. Use doctorId from list-doctors response.',
         available: false,
-        message: 'Please provide a valid doctor ID'
+        message: 'Please provide a valid doctor ID from the list'
       };
     }
 
@@ -1556,11 +2147,19 @@ async function handleFindDoctor(input) {
  */
 async function handleListDoctors(input) {
   try {
-    const { specialization, specialty, limit = 50 } = input;
+    const { specialization, specialty, limit = 50, name, doctorName } = input;
     const searchSpecialty = specialization || specialty;
+    let searchName = name || doctorName;
+
+    // Clean up doctor name - remove "Dr. " prefix if present
+    if (searchName) {
+      searchName = searchName.replace(/^dr\.\s+/i, '').trim();
+      console.log('🔍 Cleaned Doctor Name:', searchName);
+    }
 
     console.log('📋 Listing All Doctors:', {
       specialization: searchSpecialty,
+      name: searchName,
       limit
     });
 
@@ -1575,6 +2174,36 @@ async function handleListDoctors(input) {
       query.specialization = { $regex: searchSpecialty, $options: 'i' };
     }
 
+    // Optional: Filter by doctor name
+    if (searchName) {
+      // Split name into parts for flexible matching
+      const nameParts = searchName.split(/\s+/).filter(part => part.length > 0);
+      
+      if (nameParts.length === 1) {
+        // Single name part - search first or last name
+        query.$or = [
+          { firstName: { $regex: nameParts[0], $options: 'i' } },
+          { lastName: { $regex: nameParts[0], $options: 'i' } }
+        ];
+      } else if (nameParts.length >= 2) {
+        // Multiple parts - search for first name + last name combination
+        const firstName = nameParts[0];
+        const lastName = nameParts.slice(1).join(' ');
+        
+        query.$or = [
+          // Exact first name + last name
+          { 
+            firstName: { $regex: firstName, $options: 'i' },
+            lastName: { $regex: lastName, $options: 'i' }
+          },
+          // Or just first name matches
+          { firstName: { $regex: firstName, $options: 'i' } },
+          // Or just last name matches
+          { lastName: { $regex: lastName, $options: 'i' } }
+        ];
+      }
+    }
+
     // Fetch all active doctors
     const doctors = await User.find(query)
       .select('_id firstName lastName specialization department phone email licenseNumber experience city isActive')
@@ -1583,13 +2212,17 @@ async function handleListDoctors(input) {
 
     if (doctors.length === 0) {
       console.log('ℹ️ No doctors found');
+      const filterMsg = [];
+      if (searchSpecialty) filterMsg.push(`specialization "${searchSpecialty}"`);
+      if (searchName) filterMsg.push(`name "${searchName}"`);
+      
       return {
         success: true,
         error: null,
         totalDoctors: 0,
         doctors: [],
-        message: searchSpecialty 
-          ? `No doctors found with specialization "${searchSpecialty}"`
+        message: filterMsg.length > 0
+          ? `No doctors found with ${filterMsg.join(' and ')}`
           : 'No doctors available in the system'
       };
     }
@@ -1624,14 +2257,20 @@ async function handleListDoctors(input) {
       };
     }));
 
+    // Build filter description
+    const filterParts = [];
+    if (searchSpecialty) filterParts.push(`Specialization: ${searchSpecialty}`);
+    if (searchName) filterParts.push(`Name: ${searchName}`);
+    const filterDesc = filterParts.length > 0 ? filterParts.join(', ') : 'All specializations';
+
     return {
       success: true,
       error: null,
       totalDoctors: doctorsList.length,
       doctors: doctorsList,
-      filter: searchSpecialty ? `Specialization: ${searchSpecialty}` : 'All specializations',
-      message: searchSpecialty
-        ? `✅ Found ${doctorsList.length} available ${searchSpecialty} doctor(s)`
+      filter: filterDesc,
+      message: filterParts.length > 0
+        ? `✅ Found ${doctorsList.length} doctor(s) matching ${filterParts.join(' and ')}`
         : `✅ Found ${doctorsList.length} available doctors in total`
     };
   } catch (error) {
@@ -1662,8 +2301,10 @@ async function handleRegisterPatient(input) {
     // ========================================
     if (!firstName || !lastName || !email || !phone) {
       return {
-        error: 'firstName, lastName, email, and phone are required',
-        success: false
+        success: false,
+        result: {
+          error: 'firstName, lastName, email, and phone are required'
+        }
       };
     }
 
@@ -1679,14 +2320,17 @@ async function handleRegisterPatient(input) {
     if (existingPatient) {
       console.log('⚠️ Patient already exists:', existingPatient._id);
       return {
-        found: true,
-        isExisting: true,
-        patientId: existingPatient._id,
-        name: `${existingPatient.firstName} ${existingPatient.lastName}`,
-        email: existingPatient.email,
-        phone: existingPatient.phone,
-        message: `Patient ${existingPatient.firstName} already registered. Proceeding with booking...`,
-        alreadyExists: true
+        success: true,
+        result: {
+          found: true,
+          isExisting: true,
+          patientId: existingPatient._id.toString(),
+          name: `${existingPatient.firstName} ${existingPatient.lastName}`,
+          email: existingPatient.email,
+          phone: existingPatient.phone,
+          message: `Patient ${existingPatient.firstName} already registered. Proceeding with booking...`,
+          alreadyExists: true
+        }
       };
     }
 
@@ -1712,7 +2356,6 @@ async function handleRegisterPatient(input) {
       medicalHistory,
       gender,
       dateOfBirth,
-      isEmailVerified: false, // Email not verified yet via VAPI
       isActive: true
     });
 
@@ -1722,20 +2365,27 @@ async function handleRegisterPatient(input) {
 
     return {
       success: true,
-      registered: true,
-      patientId: newPatient._id,
-      name: `${newPatient.firstName} ${newPatient.lastName}`,
-      email: newPatient.email,
-      phone: newPatient.phone,
-      role: 'patient',
-      username: newPatient.username,
-      message: `✅ Patient ${newPatient.firstName} ${newPatient.lastName} registered successfully! Ready to book appointment.`
+      result: {
+        found: false,
+        isExisting: false,
+        isNew: true,
+        registered: true,
+        patientId: newPatient._id.toString(),
+        name: `${newPatient.firstName} ${newPatient.lastName}`,
+        email: newPatient.email,
+        phone: newPatient.phone,
+        username: newPatient.username,
+        message: `✅ Patient ${newPatient.firstName} ${newPatient.lastName} registered successfully! Ready to book appointment.`,
+        alreadyExists: false
+      }
     };
   } catch (error) {
     console.error('❌ Register Patient Error:', error.message);
     return {
-      error: error.message,
-      success: false
+      success: false,
+      result: {
+        error: error.message
+      }
     };
   }
 }

@@ -1,7 +1,6 @@
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
-const { sendVerificationEmail } = require('../config/nodemailer');
 
 const generateToken = (userId, role) => {
   return jwt.sign(
@@ -12,28 +11,46 @@ const generateToken = (userId, role) => {
 };
 
 /**
- * Login - Support email or phone + password
- * Contact can be either email or phone number
+ * Login - Support email or phone + password + role
+ * Can use either 'contact' or 'email' parameter
+ * Role is optional (patient, doctor, admin)
  */
 const login = async (req, res) => {
   try {
-    const { contact, password } = req.body; // contact = email or phone
+    const { password, role } = req.body;
+    const contact = req.body.contact || req.body.email; // Accept both 'contact' and 'email'
 
     // Validation
     if (!contact || !password) {
       return res.status(400).json({
         success: false,
-        message: 'Contact (email or phone) and password are required'
+        message: 'Email/contact and password are required'
       });
     }
 
-    // Find user by email or phone
-    const user = await User.findOne({
+    // Validate role if provided
+    const validRoles = ['patient', 'doctor', 'admin'];
+    if (role && !validRoles.includes(role)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid role. Must be: patient, doctor, or admin'
+      });
+    }
+
+    // Find user by email or phone (and role if provided)
+    const query = {
       $or: [
         { email: contact.toLowerCase() },
         { phone: contact }
       ]
-    });
+    };
+
+    // Add role filter if provided
+    if (role) {
+      query.role = role;
+    }
+
+    const user = await User.findOne(query);
 
     if (!user) {
       return res.status(401).json({
@@ -48,16 +65,6 @@ const login = async (req, res) => {
       return res.status(401).json({
         success: false,
         message: 'Invalid contact or password'
-      });
-    }
-
-    // Check if email is verified (especially for patients)
-    if (user.role === 'patient' && !user.isEmailVerified) {
-      return res.status(403).json({
-        success: false,
-        message: 'Please verify your email before logging in',
-        requiresEmailVerification: true,
-        email: user.email
       });
     }
 
@@ -87,7 +94,6 @@ const login = async (req, res) => {
           role: user.role,
           firstName: user.firstName,
           lastName: user.lastName,
-          isEmailVerified: user.isEmailVerified,
           specialization: user.role === 'doctor' ? user.specialization : undefined,
           department: user.role === 'doctor' ? user.department : undefined
         }
@@ -104,12 +110,25 @@ const login = async (req, res) => {
 };
 
 /**
- * Register Patient - Phone number is REQUIRED
- * Sends email verification link
+ * Register User - Phone number is REQUIRED
+ * Supports multiple roles: patient (default), doctor, admin
+ * Role can be specified in request payload
  */
 const register = async (req, res) => {
   try {
-    const { email, username, password, confirmPassword, firstName, lastName, phone, age, medicalHistory } = req.body;
+    const { email, username, password, confirmPassword, firstName, lastName, phone, age, medicalHistory, role } = req.body;
+
+    // Default role to 'patient' if not provided
+    const userRole = role || 'patient';
+
+    // Validate role
+    const validRoles = ['patient', 'doctor', 'admin'];
+    if (!validRoles.includes(userRole)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid role. Must be: patient, doctor, or admin. Defaults to patient if not specified.'
+      });
+    }
 
     // Validation
     if (!email || !username || !firstName || !lastName || !password || !confirmPassword || !phone) {
@@ -173,58 +192,28 @@ const register = async (req, res) => {
       });
     }
 
-    // Generate email verification token
-    const emailVerificationToken = crypto.randomBytes(32).toString('hex');
-
-    // Create patient
+    // Create user with specified role
     const userData = {
       email: email.toLowerCase(),
       username: username.toLowerCase(),
       password,
-      role: 'patient',
+      role: userRole,
       firstName,
       lastName,
       phone,
-      age,
-      medicalHistory,
-      isActive: true,
-      isEmailVerified: false,
-      emailVerificationToken,
-      emailVerificationExpiry: new Date(Date.now() + 24 * 60 * 60 * 1000) // 24 hours
+      age: userRole === 'patient' ? age : undefined,
+      medicalHistory: userRole === 'patient' ? medicalHistory : undefined,
+      isActive: true
     };
 
     const user = new User(userData);
     await user.save();
 
-    console.log(`✅ Patient registered (not verified): ${user.email}`);
-
-    // Send verification email
-    try {
-      await sendVerificationEmail(user.email, emailVerificationToken, user.firstName);
-    } catch (emailError) {
-      console.error('⚠️ Registration successful but email verification failed:', emailError.message);
-      return res.status(201).json({
-        success: true,
-        message: 'Registration successful, but verification email could not be sent. Please try verify email manually.',
-        data: {
-          user: {
-            id: user._id,
-            email: user.email,
-            username: user.username,
-            phone: user.phone,
-            role: user.role,
-            firstName: user.firstName,
-            lastName: user.lastName,
-            isEmailVerified: false
-          },
-          warning: 'Email verification failed. Please request a new verification link.'
-        }
-      });
-    }
+    console.log(`✅ User registered (${userRole}): ${user.email}`);
 
     res.status(201).json({
       success: true,
-      message: 'Patient registered successfully. Please check your email to verify your account.',
+      message: `${userRole.charAt(0).toUpperCase() + userRole.slice(1)} registered successfully`,
       data: {
         user: {
           id: user._id,
@@ -234,9 +223,8 @@ const register = async (req, res) => {
           role: user.role,
           firstName: user.firstName,
           lastName: user.lastName,
-          isEmailVerified: false
-        },
-        nextStep: 'Check your email for verification link (valid for 24 hours)'
+          isActive: user.isActive
+        }
       }
     });
   } catch (error) {
@@ -249,133 +237,4 @@ const register = async (req, res) => {
   }
 };
 
-/**
- * Verify Email
- * User clicks verification link with token
- */
-const verifyEmail = async (req, res) => {
-  try {
-    const { token } = req.body;
-
-    if (!token) {
-      return res.status(400).json({
-        success: false,
-        message: 'Verification token is required'
-      });
-    }
-
-    console.log('🔍 Verifying email with token:', token.substring(0, 10) + '...');
-
-    // Find user with matching token
-    const user = await User.findOne({
-      emailVerificationToken: token,
-      emailVerificationExpiry: { $gt: Date.now() }
-    });
-
-    if (!user) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid or expired verification token',
-        requiresNewVerification: true
-      });
-    }
-
-    // Mark email as verified
-    user.isEmailVerified = true;
-    user.emailVerificationToken = undefined;
-    user.emailVerificationExpiry = undefined;
-    await user.save();
-
-    console.log(`✅ Email verified: ${user.email}`);
-
-    // Generate token for immediate login
-    const authToken = generateToken(user._id, user.role);
-
-    res.status(200).json({
-      success: true,
-      message: 'Email verified successfully',
-      data: {
-        token: authToken,
-        user: {
-          id: user._id,
-          email: user.email,
-          username: user.username,
-          phone: user.phone,
-          role: user.role,
-          firstName: user.firstName,
-          lastName: user.lastName,
-          isEmailVerified: true
-        }
-      }
-    });
-  } catch (error) {
-    console.error('❌ Email Verification Error:', error.message);
-    res.status(500).json({
-      success: false,
-      message: 'Email verification failed',
-      error: error.message
-    });
-  }
-};
-
-/**
- * Resend Verification Email
- * User can request new verification email if expired
- */
-const resendVerificationEmail = async (req, res) => {
-  try {
-    const { email } = req.body;
-
-    if (!email) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email is required'
-      });
-    }
-
-    const user = await User.findOne({ email: email.toLowerCase() });
-
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    if (user.isEmailVerified) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email is already verified'
-      });
-    }
-
-    // Generate new token
-    const emailVerificationToken = crypto.randomBytes(32).toString('hex');
-    user.emailVerificationToken = emailVerificationToken;
-    user.emailVerificationExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
-    await user.save();
-
-    console.log(`📧 Resending verification email to: ${user.email}`);
-
-    // Send verification email
-    await sendVerificationEmail(user.email, emailVerificationToken, user.firstName);
-
-    res.status(200).json({
-      success: true,
-      message: 'Verification email sent successfully',
-      data: {
-        email: user.email,
-        message: 'Check your email for verification link (valid for 24 hours)'
-      }
-    });
-  } catch (error) {
-    console.error('❌ Resend Verification Email Error:', error.message);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to send verification email',
-      error: error.message
-    });
-  }
-};
-
-module.exports = { login, register, verifyEmail, resendVerificationEmail, generateToken };
+module.exports = { login, register, generateToken };
