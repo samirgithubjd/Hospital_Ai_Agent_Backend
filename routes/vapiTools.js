@@ -3,6 +3,16 @@ const router = express.Router();
 const User = require('../models/User');
 const Slot = require('../models/Slot');
 const Appointment = require('../models/Appointment');
+const { Types } = require('mongoose');
+
+/**
+ * Helper function to validate if a string is a valid MongoDB ObjectId
+ */
+function isValidObjectId(id) {
+  if (!id || typeof id !== 'string') return false;
+  if (id.toLowerCase() === 'unknown') return false; // Reject "unknown" string
+  return Types.ObjectId.isValid(id);
+}
 
 /**
  * VAPI Tool Handler
@@ -191,6 +201,25 @@ router.post('/check-slots-availability', async (req, res) => {
     // SCENARIO 1: Check specific doctor's slots by ID
     // ============================================
     if (finalDoctorId) {
+      // Validate doctorId format before querying
+      if (!isValidObjectId(finalDoctorId)) {
+        const errorResult = {
+          success: false,
+          error: `Invalid doctor ID format: ${finalDoctorId}`,
+          availabilityStatus: 'invalid_doctor_id'
+        };
+        
+        if (toolCallId) {
+          return res.status(200).json({
+            results: [{
+              toolCallId: toolCallId,
+              result: errorResult
+            }]
+          });
+        }
+        return res.status(400).json(errorResult);
+      }
+
       const doctor = await User.findById(finalDoctorId).select(
         'firstName lastName specialization phone email role isActive'
       );
@@ -1287,6 +1316,16 @@ async function handleBookAppointmentVapi(input) {
     let patient;
 
     if (finalPatientId) {
+      // Validate patientId format before querying
+      if (!isValidObjectId(finalPatientId)) {
+        return {
+          success: false,
+          error: `Invalid patient ID format: ${finalPatientId}. Please check the patient ID.`,
+          status: 'invalid_patient_id',
+          suggestion: 'Patient must be registered with a valid ID before booking'
+        };
+      }
+      
       // Look up by ID
       patient = await User.findById(finalPatientId).select('_id firstName lastName email phone role');
     } else if (finalPatientPhone) {
@@ -1321,6 +1360,15 @@ async function handleBookAppointmentVapi(input) {
     // ========================================
     // STEP 3: VERIFY DOCTOR EXISTS
     // ========================================
+    // Validate doctorId format before querying
+    if (!isValidObjectId(finalDoctorId)) {
+      return {
+        success: false,
+        error: `Invalid doctor ID format: ${finalDoctorId}`,
+        status: 'invalid_doctor_id'
+      };
+    }
+    
     const doctor = await User.findById(finalDoctorId).select('_id firstName lastName specialization email phone role');
 
     if (!doctor || doctor.role !== 'doctor') {
@@ -1632,6 +1680,21 @@ async function handleBookAppointment(input) {
           date: date ? 'provided' : 'missing',
           time: time ? 'provided' : 'missing'
         }
+      };
+    }
+
+    // Validate ObjectId formats
+    if (!isValidObjectId(finalPatientId)) {
+      return {
+        error: `Invalid patient ID format: ${finalPatientId}. Please check the patient ID.`,
+        availabilityStatus: 'invalid_patient_id'
+      };
+    }
+
+    if (!isValidObjectId(finalDoctorId)) {
+      return {
+        error: `Invalid doctor ID format: ${finalDoctorId}. Please check the doctor ID.`,
+        availabilityStatus: 'invalid_doctor_id'
       };
     }
 
@@ -1954,6 +2017,16 @@ async function handleCheckDoctorAvailability(input) {
         error: 'Doctor ID is required. Use doctorId from list-doctors response.',
         available: false,
         message: 'Please provide a valid doctor ID from the list'
+      };
+    }
+
+    // Validate doctorId format
+    if (!isValidObjectId(finalDoctorId)) {
+      console.log('❌ Invalid Doctor ID format:', finalDoctorId);
+      return {
+        error: `Invalid doctor ID format: ${finalDoctorId}. Please use a valid doctor ID from the list.`,
+        available: false,
+        message: 'Invalid doctor ID format'
       };
     }
 

@@ -1,5 +1,6 @@
 const Patient = require('../models/Patient');
 const User = require('../models/User');
+const { Types } = require('mongoose');
 
 const getAllPatients = async (req, res) => {
   try {
@@ -25,6 +26,15 @@ const getAllPatients = async (req, res) => {
 const getPatientById = async (req, res) => {
   try {
     const { id } = req.params;
+
+    // Validate ObjectId format
+    if (!Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid patient ID format',
+        error: `Patient ID "${id}" is not a valid format`
+      });
+    }
 
     const patient = await User.findById(id)
       .select('-password');

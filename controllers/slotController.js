@@ -2,6 +2,39 @@ const Slot = require('../models/Slot');
 const User = require('../models/User');
 
 /**
+ * Helper function to delete old slots (past dates)
+ * Called automatically before major slot queries
+ */
+const deleteOldSlots = async () => {
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const result = await Slot.deleteMany({
+      date: { $lt: today }
+    });
+
+    if (result.deletedCount > 0) {
+      console.log(`🗑️  Deleted ${result.deletedCount} old slots from the database`);
+    }
+
+    return result.deletedCount;
+  } catch (error) {
+    console.error('❌ Error deleting old slots:', error.message);
+    return 0;
+  }
+};
+
+/**
+ * Helper function to get today's date at start (00:00:00)
+ */
+const getTodayStart = () => {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return today;
+};
+
+/**
  * Add available slots for a doctor (Doctor/Admin only)
  */
 const addSlots = async (req, res) => {
@@ -120,6 +153,9 @@ const getAvailableSlots = async (req, res) => {
       });
     }
 
+    // Delete old slots first
+    await deleteOldSlots();
+
     // Verify doctor exists
     const doctor = await User.findById(doctorId);
     if (!doctor || doctor.role !== 'doctor') {
@@ -129,9 +165,21 @@ const getAvailableSlots = async (req, res) => {
       });
     }
 
-    // Parse date
+    // Parse date - only allow today and future dates
     const queryDate = new Date(date);
     queryDate.setHours(0, 0, 0, 0);
+
+    const todayStart = getTodayStart();
+
+    // Check if requested date is in the past
+    if (queryDate < todayStart) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot request slots for past dates. Please select today or a future date.',
+        requestedDate: date,
+        minimumDate: todayStart.toISOString().split('T')[0]
+      });
+    }
 
     const nextDay = new Date(queryDate);
     nextDay.setDate(nextDay.getDate() + 1);
@@ -184,9 +232,24 @@ const getAllAvailableSlotsForDate = async (req, res) => {
       });
     }
 
-    // Parse date
+    // Delete old slots first
+    await deleteOldSlots();
+
+    // Parse date - only allow today and future dates
     const queryDate = new Date(date);
     queryDate.setHours(0, 0, 0, 0);
+
+    const todayStart = getTodayStart();
+
+    // Check if requested date is in the past
+    if (queryDate < todayStart) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot request slots for past dates. Please select today or a future date.',
+        requestedDate: date,
+        minimumDate: todayStart.toISOString().split('T')[0]
+      });
+    }
 
     const nextDay = new Date(queryDate);
     nextDay.setDate(nextDay.getDate() + 1);
@@ -354,6 +417,9 @@ const getDoctorSlots = async (req, res) => {
       });
     }
 
+    // Delete old slots first
+    await deleteOldSlots();
+
     // Verify doctor exists
     const doctor = await User.findById(doctorId);
     if (!doctor || doctor.role !== 'doctor') {
@@ -369,10 +435,15 @@ const getDoctorSlots = async (req, res) => {
     const end = new Date(endDate);
     end.setHours(23, 59, 59, 999);
 
+    const todayStart = getTodayStart();
+
+    // If start date is before today, adjust to today
+    const adjustedStart = start < todayStart ? todayStart : start;
+
     const slots = await Slot.find({
       doctorId,
       date: {
-        $gte: start,
+        $gte: adjustedStart,
         $lte: end
       }
     })
@@ -391,7 +462,11 @@ const getDoctorSlots = async (req, res) => {
       data: {
         doctorId,
         doctorName: `${doctor.firstName} ${doctor.lastName}`,
-        dateRange: { startDate, endDate },
+        dateRange: { 
+          requestedStart: startDate,
+          requestedEnd: endDate,
+          actualStart: adjustedStart.toISOString().split('T')[0]
+        },
         summary,
         slots
       }

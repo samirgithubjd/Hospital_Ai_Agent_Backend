@@ -2,6 +2,43 @@ const Appointment = require('../models/Appointment');
 const User = require('../models/User');
 const Call = require('../models/Call');
 const Slot = require('../models/Slot'); // Import for atomic slot updates
+const { Types } = require('mongoose');
+
+/**
+ * Helper function to determine appointment status
+ * If appointment date/time is in the past and status is 'scheduled' or 'confirmed',
+ * return 'completed'. Otherwise return actual status.
+ */
+const getAppointmentStatus = (appointment) => {
+  if (!appointment) return null;
+  
+  const now = new Date();
+  const appointmentDateTime = new Date(appointment.appointmentDate);
+  
+  // Parse time (HH:MM format) and add to date
+  if (appointment.appointmentTime) {
+    const [hours, minutes] = appointment.appointmentTime.split(':');
+    appointmentDateTime.setHours(parseInt(hours), parseInt(minutes), 0, 0);
+  } else {
+    appointmentDateTime.setHours(23, 59, 59, 999);
+  }
+  
+  // If appointment is in the past and status is scheduled/confirmed, mark as completed
+  if (appointmentDateTime < now && ['scheduled', 'confirmed'].includes(appointment.status)) {
+    return 'completed';
+  }
+  
+  return appointment.status;
+};
+
+/**
+ * Helper function to format appointment with correct status
+ */
+const formatAppointmentWithStatus = (appointment) => {
+  const appointmentObj = appointment.toObject ? appointment.toObject() : appointment;
+  appointmentObj.status = getAppointmentStatus(appointment);
+  return appointmentObj;
+};
 
 // Create appointment with ATOMIC slot booking
 const createAppointment = async (req, res) => {
@@ -112,13 +149,16 @@ const createAppointment = async (req, res) => {
       { path: 'doctorId', select: 'firstName lastName specialization department email username' }
     ]);
 
+    // Format appointment with correct status based on date/time
+    const formattedAppointment = formatAppointmentWithStatus(savedAppointment);
+
     res.status(201).json({
       success: true,
       message: 'Appointment booked successfully',
       availabilityStatus: 'confirmed_and_reserved',
       availabilityConfirmed: true,
       doubleBookingPrevented: true,
-      data: savedAppointment
+      data: formattedAppointment
     });
   } catch (error) {
     console.error('Create Appointment Error:', error.message);
@@ -152,16 +192,19 @@ const getAllAppointments = async (req, res) => {
     const appointments = await Appointment.find(filter)
       .populate('patientId', 'firstName lastName email phone username')
       .populate('doctorId', 'firstName lastName specialization department email username')
-      .sort({ appointmentDate: -1 })
+      .sort({ appointmentDate: -1, appointmentTime: -1 })
       .skip(skip)
       .limit(parseInt(limit));
 
     const total = await Appointment.countDocuments(filter);
 
+    // Format appointments with correct status based on date/time
+    const formattedAppointments = appointments.map(formatAppointmentWithStatus);
+
     res.status(200).json({
       success: true,
       message: 'Appointments retrieved',
-      data: appointments,
+      data: formattedAppointments,
       pagination: {
         total,
         page: parseInt(page),
@@ -198,16 +241,19 @@ const getDoctorAppointments = async (req, res) => {
 
     const appointments = await Appointment.find(filter)
       .populate('patientId', 'firstName lastName email phone username age')
-      .sort({ appointmentDate: 1 })
+      .sort({ appointmentDate: -1, appointmentTime: -1 })
       .skip(skip)
       .limit(parseInt(limit));
 
     const total = await Appointment.countDocuments(filter);
 
+    // Format appointments with correct status based on date/time
+    const formattedAppointments = appointments.map(formatAppointmentWithStatus);
+
     res.status(200).json({
       success: true,
       message: 'Your appointments retrieved',
-      data: appointments,
+      data: formattedAppointments,
       pagination: {
         total,
         page: parseInt(page),
@@ -238,16 +284,19 @@ const getPatientAppointments = async (req, res) => {
 
     const appointments = await Appointment.find(filter)
       .populate('doctorId', 'firstName lastName specialization department email username')
-      .sort({ appointmentDate: 1 })
+      .sort({ appointmentDate: -1, appointmentTime: -1 })
       .skip(skip)
       .limit(parseInt(limit));
 
     const total = await Appointment.countDocuments(filter);
 
+    // Format appointments with correct status based on date/time
+    const formattedAppointments = appointments.map(formatAppointmentWithStatus);
+
     res.status(200).json({
       success: true,
       message: 'Your appointments retrieved',
-      data: appointments,
+      data: formattedAppointments,
       pagination: {
         total,
         page: parseInt(page),
@@ -270,6 +319,15 @@ const getAppointmentById = async (req, res) => {
   try {
     const { id } = req.params;
 
+    // Validate ObjectId format
+    if (!Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid appointment ID format',
+        error: `Appointment ID "${id}" is not a valid format`
+      });
+    }
+
     const appointment = await Appointment.findById(id)
       .populate('patientId', 'firstName lastName email phone username age medicalHistory')
       .populate('doctorId', 'firstName lastName specialization department email username phone');
@@ -281,10 +339,13 @@ const getAppointmentById = async (req, res) => {
       });
     }
 
+    // Format appointment with correct status based on date/time
+    const formattedAppointment = formatAppointmentWithStatus(appointment);
+
     res.status(200).json({
       success: true,
       message: 'Appointment retrieved',
-      data: appointment
+      data: formattedAppointment
     });
   } catch (error) {
     console.error('Get Appointment Error:', error.message);
@@ -301,6 +362,15 @@ const updateAppointment = async (req, res) => {
   try {
     const { id } = req.params;
     const { appointmentDate, appointmentTime, symptoms, diagnosis, prescriptions, notes, status } = req.body;
+
+    // Validate ObjectId format
+    if (!Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid appointment ID format',
+        error: `Appointment ID "${id}" is not a valid format`
+      });
+    }
 
     const appointment = await Appointment.findById(id);
     if (!appointment) {
@@ -330,10 +400,13 @@ const updateAppointment = async (req, res) => {
       { path: 'doctorId', select: 'firstName lastName specialization' }
     ]);
 
+    // Format appointment with correct status based on date/time
+    const formattedAppointment = formatAppointmentWithStatus(appointment);
+
     res.status(200).json({
       success: true,
       message: 'Appointment updated successfully',
-      data: appointment
+      data: formattedAppointment
     });
   } catch (error) {
     console.error('Update Appointment Error:', error.message);
@@ -350,6 +423,15 @@ const cancelAppointment = async (req, res) => {
   try {
     const { id } = req.params;
     const { reason, cancelledBy } = req.body;
+
+    // Validate ObjectId format
+    if (!Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid appointment ID format',
+        error: `Appointment ID "${id}" is not a valid format`
+      });
+    }
 
     const appointment = await Appointment.findById(id);
     if (!appointment) {
@@ -372,10 +454,13 @@ const cancelAppointment = async (req, res) => {
 
     await appointment.save();
 
+    // Format appointment with correct status based on date/time
+    const formattedAppointment = formatAppointmentWithStatus(appointment);
+
     res.status(200).json({
       success: true,
       message: 'Appointment cancelled successfully',
-      data: appointment
+      data: formattedAppointment
     });
   } catch (error) {
     console.error('Cancel Appointment Error:', error.message);
@@ -392,6 +477,15 @@ const rescheduleAppointment = async (req, res) => {
   try {
     const { id } = req.params;
     const { newDate, newTime } = req.body;
+
+    // Validate ObjectId format
+    if (!Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid appointment ID format',
+        error: `Appointment ID "${id}" is not a valid format`
+      });
+    }
 
     if (!newDate || !newTime) {
       return res.status(400).json({
@@ -420,10 +514,13 @@ const rescheduleAppointment = async (req, res) => {
       { path: 'doctorId', select: 'firstName lastName specialization' }
     ]);
 
+    // Format appointment with correct status based on date/time
+    const formattedAppointment = formatAppointmentWithStatus(appointment);
+
     res.status(200).json({
       success: true,
       message: 'Appointment rescheduled successfully',
-      data: appointment
+      data: formattedAppointment
     });
   } catch (error) {
     console.error('Reschedule Appointment Error:', error.message);
@@ -448,16 +545,19 @@ const getAppointments = async (req, res) => {
     const appointments = await Appointment.find(filter)
       .populate('patientId', 'firstName lastName email')
       .populate('doctorId', 'firstName lastName specialization')
-      .sort({ appointmentDate: -1 })
+      .sort({ appointmentDate: -1, appointmentTime: -1 })
       .skip(skip)
       .limit(parseInt(limit));
 
     const total = await Appointment.countDocuments(filter);
 
+    // Format appointments with correct status based on date/time
+    const formattedAppointments = appointments.map(formatAppointmentWithStatus);
+
     res.status(200).json({
       success: true,
       message: 'Appointments retrieved',
-      data: appointments,
+      data: formattedAppointments,
       pagination: {
         total,
         page: parseInt(page),
